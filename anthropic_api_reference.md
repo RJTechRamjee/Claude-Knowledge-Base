@@ -15,6 +15,80 @@ tool_choice={"type": "tool", "name": "calculator"}  # Force a specific tool
 tool_choice={"type": "none"}                        # Disable all tools
 ```
 
+### `auto` vs `any` — the critical distinction
+
+| Mode | Must call a tool? | Can respond with plain text? | Claude picks which tool? |
+|---|---|---|---|
+| `auto` | ❌ No — optional | ✅ Yes | ✅ Yes |
+| `any` | ✅ Yes — guaranteed | ❌ No | ✅ Yes |
+| `tool` | ✅ Yes — guaranteed | ❌ No | ❌ No (forced) |
+| `none` | ❌ Prohibited | ✅ Yes | — |
+
+**`auto`** — Claude decides whether to call a tool *or skip all tools entirely* and reply with plain text. It selects the best option, including the option of calling no tool.
+
+**`any`** — Claude must call one of the registered tools. It cannot reply with plain text. It picks which tool fits the input best using its semantic understanding.
+
+### When to use `tool` (force a specific tool)
+
+Use `{"type": "tool", "name": "..."}` when a **specific tool must run on this turn** — regardless of what other tools are registered.
+
+```python
+# Pipeline step 1: extract_metadata must run before enrichment or summarization
+response = client.messages.create(
+    model="claude-sonnet-4-6",
+    tools=[extract_metadata_tool, translate_text_tool, summarize_document_tool],
+    tool_choice={"type": "tool", "name": "extract_metadata"},  # only this fires
+    messages=[{"role": "user", "content": document_text}]
+)
+```
+
+`any` is wrong here: it guarantees *some* tool fires, but Claude could pick `translate_text` or `summarize_document` first, violating the dependency order.
+
+### Enforcing tool ordering across a pipeline
+
+`tool_choice` is a **per-request** setting, not a session-wide execution plan. To guarantee ordering when all tools are eventually needed, split into multiple turns:
+
+```python
+# Turn 1 — force the prerequisite tool
+resp1 = client.messages.create(
+    tools=[extract_metadata_tool, translate_text_tool, summarize_document_tool],
+    tool_choice={"type": "tool", "name": "extract_metadata"},
+    messages=[{"role": "user", "content": doc}]
+)
+metadata_result = run_tool(resp1)   # execute extract_metadata locally
+
+# Turn 2 — pass metadata back; Claude calls remaining tools freely
+resp2 = client.messages.create(
+    tools=[translate_text_tool, summarize_document_tool],
+    tool_choice={"type": "any"},    # must call one of the remaining tools
+    messages=[
+        {"role": "user", "content": doc},
+        {"role": "assistant", "content": resp1.content},
+        {"role": "user",  "content": [{"type": "tool_result", ...metadata_result}]},
+    ]
+)
+```
+
+Key insight: all three tools are ultimately invoked, but ordering is enforced by structuring turns — not by hoping Claude calls them in the right sequence within a single turn.
+
+### When to use `any` instead of `auto`
+
+Use `any` when you need **guaranteed structured output for every input** and cannot tolerate a plain-text fallback.
+
+```python
+# Support ticket router — must always call one extraction tool, never reply with text
+response = client.messages.create(
+    model="claude-sonnet-4-6",
+    tools=[bug_report_tool, feature_request_tool, billing_issue_tool],
+    tool_choice={"type": "any"},   # ← guarantees one tool fires; Claude picks which
+    messages=[{"role": "user", "content": ticket_text}]
+)
+```
+
+Why `auto` fails here: an ambiguous ticket might cause Claude to reply *"I'm not sure how to classify this"* in plain text instead of calling any tool — breaking the guarantee of a structured extraction result for every ticket. `any` removes that escape hatch.
+
+Why regex pre-classification fails: fragile keyword matching misroutes tickets. Letting Claude read the ticket and pick among all registered tools (`any`) uses semantic understanding instead.
+
 ---
 
 ## 2. Content Block Types
@@ -443,6 +517,54 @@ while response.stop_reason == "tool_use":
 final = next(b.text for b in response.content if b.type == "text")
 ```
 
+### Handling tool execution failures — feed errors back, don't terminate
+
+When a tool raises an exception, append a `tool_result` block with `"is_error": true` and continue the loop. This keeps the failure visible in Claude's context so it can reason over it and decide the next step autonomously.
+
+```python
+while response.stop_reason == "tool_use":
+    tool_call = next(b for b in response.content if b.type == "tool_use")
+
+    try:
+        tool_result = run_my_tool(tool_call.name, tool_call.input)
+        result_block = {
+            "type": "tool_result",
+            "tool_use_id": tool_call.id,
+            "content": tool_result
+        }
+    except Exception as e:
+        result_block = {
+            "type": "tool_result",
+            "tool_use_id": tool_call.id,
+            "content": str(e),
+            "is_error": True        # ← tells Claude this is a failure, not a result
+        }
+
+    messages.append({"role": "assistant", "content": response.content})
+    messages.append({"role": "user", "content": [result_block]})
+    response = client.messages.create(model=..., tools=..., messages=messages)
+```
+
+With `is_error: true` in context, Claude can:
+- Retry the same tool with different arguments
+- Call a fallback tool instead
+- Explain the failure and ask the user for clarification
+- Decide the task is unrecoverable and stop
+
+**Why not terminate immediately on failure?**
+
+Terminating on any tool error discards Claude's ability to reason about the failure. Feeding the error back as a `tool_result` is consistent with model-driven reasoning — Claude sees the failure in context and decides the next step, rather than the loop logic making that decision blindly.
+
+| Approach | Claude sees the error? | Can Claude recover? |
+|---|---|---|
+| Terminate loop on exception | ❌ No | ❌ No |
+| Append `is_error: true` and continue | ✅ Yes | ✅ Yes — retry, fallback, or explain |
+
+**What `is_error` does NOT do:**
+- It does not remove the need for `stop_reason` checks — the loop still exits when `stop_reason != "tool_use"`
+- It does not reset rate limits or guarantee retry success
+- The Messages API does not auto-terminate on a missing or malformed `is_error` field
+
 ---
 
 ## 12. Session Management (Claude Code CLI)
@@ -651,6 +773,18 @@ Claude Code invokes the Agent tool internally; the reviewer subagent receives on
 
 **New chat is the simplest guarantee:** A new VS Code chat window = a completely stateless instance. No prompt engineering needed — independence is structural.
 
+### Foreground subagent error handling — partial output behavior (v2.1.199+)
+If a rate limit, overload, or server error cuts off a **foreground** subagent that has already produced text output, the Agent tool returns that partial output with a note that the subagent didn't finish. The coordinator receives the incomplete analysis and an explicit status so it can decide on follow-up actions.
+
+If the subagent produced **no text output** (only tool calls) before the error, it instead fails with: `'Agent terminated early due to an API error'`.
+
+| Subagent state at error | Agent tool result |
+|---|---|
+| Already produced text output | Partial text + note that subagent didn't finish |
+| Only tool calls, no text output | `'Agent terminated early due to an API error'` |
+
+This behavior requires Claude Code **v2.1.199 or later**.
+
 ---
 
 ## 15. Structured Output — Handling Missing Data in Tool Schemas
@@ -834,10 +968,32 @@ This only works reliably if all repos are cloned under a common workspace folder
 
 Claude Code walks up the directory tree (same as CLAUDE.md), so a skill in a **parent directory's** `.claude/skills/` is available to all subdirectories on that machine.
 
+### Personal skills — keeping a skill private to one developer
+
+To create a skill that is **never committed to the shared repo** and **invisible to teammates**:
+
+```
+~/.claude/skills/my-standup/SKILL.md
+```
+
+- `~` = the user's **home directory** (e.g. `C:\Users\alice\.claude\` on Windows, `~/.claude/` on macOS/Linux) — entirely outside any git repository
+- Skills and slash commands are unified: the above file is invokable as `/my-standup`
+- The `SKILL.md` file uses YAML frontmatter + Markdown instructions (same format as project skills)
+- Because it lives in the home directory, it is **never staged, committed, or visible in pull requests**
+
+**Do NOT use** `.claude/commands/my-standup.md` (no `~`) — that path is inside the project folder, will appear in `git status`, and teammates will see `/my-standup` in their `/` menus.
+
+| Location | In git repo? | Visible to teammates? | Correct for personal use? |
+|---|---|---|---|
+| `~/.claude/skills/my-standup/SKILL.md` | ❌ Never | ❌ No | ✅ Yes |
+| `.claude/skills/my-standup/SKILL.md` | ✅ Yes (committed) | ✅ Yes | ❌ No |
+| `.claude/commands/my-standup.md` | ✅ Yes (committed) | ✅ Yes | ❌ No |
+
 ### Key facts
 - Skills are **not** resolved through the Skills API — that path is for Claude API workspaces, not Claude Code
 - `~/.claude/skills/` does **not** sync across machines automatically; copy the file manually or use dotfiles management
 - Parent-directory `.claude/skills/` is inherited by all child project directories (directory tree walk-up)
+- `~/.claude/` (home directory) is **never inside any git repo** — files there are always private to that developer
 
 ---
 
@@ -1319,10 +1475,34 @@ Two hooks (wrong for transform + enforce):
 
 **Rule: if Hook B depends on Hook A's transformation, combine them into one hook.**
 
+### Multiple PreToolUse hooks on the same event — conflict resolution
+
+When several hooks fire for the same event, the **most restrictive decision wins**:
+
+```
+deny > defer > ask > allow
+```
+
+Example: three hooks registered for `process_refund`:
+- Identity verification hook → `"deny"`
+- Fraud-score hook → `"allow"`
+- Audit logging hook → `{}` (empty object, i.e. no decision)
+
+Result: **tool call is blocked** — `deny` from any hook overrides `allow` results from all others. The empty-object response is treated as abstention and does not influence the outcome.
+
+| Decision priority (highest → lowest) | Meaning |
+|---|---|
+| `deny` | Block the tool call unconditionally |
+| `defer` | Block but allow a human to override |
+| `ask` | Pause and prompt the user |
+| `allow` | Permit execution |
+| `{}` (empty / no field) | Abstain — does not affect outcome |
+
 ### Key facts
 - Only `PreToolUse` can block a tool call — all other hooks are observational
 - `PreToolUse` can also rewrite tool input via `updatedInput` before the tool executes
 - `updatedInput` from one PreToolUse hook does NOT propagate to the next — each hook sees the original input
+- When multiple PreToolUse hooks disagree, the most restrictive decision wins (`deny > defer > ask > allow`)
 - `Notification` hooks fire after the fact and cannot prevent execution
 - Hook matchers can be scoped to specific tool names (not session-wide)
 - `PostToolUse` cannot block — the tool has already executed by the time it fires
@@ -1380,4 +1560,167 @@ User-level mirrors exist under `~/.claude/` for `CLAUDE.md`, `rules/`, `skills/`
 
 ---
 
-*Reference based on Anthropic API as of August 2026. Check [docs.anthropic.com](https://docs.anthropic.com) for the latest. See [mental_map.md](mental_map.md) for a full structural overview.*
+## 23. Claude Code Tool Selection — Bash vs. Read / Glob / Grep
+
+Choosing the wrong tool produces no result or a misleading one. The rule: **static file operations use dedicated tools; execution and live output require Bash.**
+
+| Goal | Correct tool | Wrong tool (and why it fails) |
+|---|---|---|
+| Run a test suite and capture stack trace | **Bash** — invokes the runner, captures stdout/stderr | `Read` — reads config, not live output; `Glob` — finds files, not pass/fail status |
+| Find files by name pattern | **Glob** | `Bash(find …)` — works but slower and less integrated |
+| Search file contents for a symbol | **Grep** | `Bash(grep …)` — works but bypasses the optimised tool |
+| Read a specific file's contents | **Read** | `Bash(cat …)` — unnecessary shell overhead |
+| Run any terminal command (build, lint, deploy, git) | **Bash** | No substitute — only Bash executes commands |
+
+### Why Glob / Grep / Read cannot replace Bash for test execution
+
+- **Glob** lists files that *match a pattern* — finding `**/*.test.*` only confirms test files exist, not that they pass.
+- **Grep** finds text in files — matching the word "test" in source code says nothing about runtime behaviour.
+- **Read** opens a file — reading a test runner's config describes how tests are *configured*, not the current pass/fail outcome.
+
+Only **Bash** actually executes the command and returns its stdout and stderr (including the stack trace), which is what is needed to reproduce and observe a failure.
+
+### Key facts
+- Use `Bash` whenever you need a process to run and return its live output
+- Reading a config file is not a substitute for running the program
+- Prefer the dedicated `Read`, `Glob`, `Grep` tools over their Bash equivalents for pure file operations — they are faster and require fewer permissions
+
+---
+
+## 24. Multi-Agent Architecture — Hub-and-Spoke Pattern
+
+### What it is
+
+A multi-agent topology where one **coordinator (hub)** orchestrates multiple **specialist subagents (spokes)**. Each spoke has an isolated context and does one focused job; all cross-cutting decisions flow through the hub.
+
+```
+User
+  │
+  ▼
+Coordinator (hub)      ← owns: orchestration, retry/fallback, sequencing, final answer
+  ├── Web-search subagent   (spoke) — searches, returns results, knows nothing else
+  ├── Code-review subagent  (spoke) — reviews code, returns findings, knows nothing else
+  └── Data-fetch subagent   (spoke) — fetches data, returns payload, knows nothing else
+```
+
+### Coordinator responsibilities
+- Dispatch tasks to the right subagent
+- Receive results (including errors) from subagents
+- Decide whether to retry, fall back, or synthesize partial results
+- Produce the final answer to the user
+
+### Subagent responsibilities
+- Execute one focused task
+- Report results **or errors** back to the coordinator
+- No awareness of other subagents or overall task state
+
+### Error handling — coordinator owns retry/fallback
+
+When a subagent hits a transient error (e.g. network failure during web search), the subagent reports it and stops. The coordinator decides what to do next:
+
+| Option | When to use |
+|---|---|
+| Retry the same subagent | Transient/recoverable errors |
+| Invoke a fallback subagent | Persistent failure, alternative source available |
+| Proceed without that result | Error is non-critical, partial result is acceptable |
+| Abort and surface the error | Error is critical, task cannot continue |
+
+**Do NOT** put retry logic inside each subagent — that duplicates logic across spokes and breaks the centralized control that is the defining benefit of hub-and-spoke.
+
+### Why not put error handling in the subagent?
+
+Subagents operate with isolated contexts and are not designed for cross-cutting decisions. Delegating recovery to each subagent:
+- Duplicates error-handling logic across every spoke
+- Makes retry/fallback behaviour inconsistent
+- Undermines the coordinator's ability to make globally informed decisions (e.g. "I already have enough data from other spokes — don't retry")
+
+### Variants and competing patterns
+
+**Hierarchical (Tree)** — hub-and-spoke at multiple levels. The top coordinator has sub-coordinators, each managing their own spokes. Use when a task has natural sub-domains too large for one coordinator.
+```
+Top Coordinator
+  ├── Research Coordinator → [Web-search agent, Database agent]
+  └── Writing Coordinator  → [Draft agent, Edit agent]
+```
+
+**Parallel Fan-out / MapReduce** — coordinator splits a task into N identical chunks, dispatches all in parallel, merges results. Spokes run the *same* task on different data (not different specialisms).
+```
+Coordinator → [chunk1, chunk2, chunk3] → all run in parallel → merge
+```
+
+**Sequential Pipeline** — no central coordinator; each agent's output feeds the next.
+```
+Extract → Summarise → Translate → Format
+```
+Good for linear document workflows. Weakness: one failure breaks the entire chain with no retry point.
+
+**Peer-to-Peer / Mesh** — agents invoke each other directly; no hub. Flexible but hard to debug; context isolation breaks down quickly. Rarely used in LLM systems.
+
+**Blackboard** — all agents share a common workspace (file, database, or memory store). Each reads state, does work, and writes back. Good for collaborative document assembly; risk of concurrent write conflicts.
+
+**Adversarial / Debate** — two agents with opposing roles argue to a conclusion; a judge decides. Used for red-teaming, verification, and hallucination reduction.
+```
+Generator → Critic → Judge → final answer
+```
+
+### Pattern comparison
+
+| Pattern | Central coordinator? | Parallelism | Best for |
+|---|---|---|---|
+| Hub-and-Spoke | ✅ Yes | ✅ Yes | General orchestration |
+| Hierarchical | ✅ Multi-level | ✅ Yes | Very large, structured tasks |
+| MapReduce | ✅ Yes | ✅ Maximum | Same task, many data chunks |
+| Sequential Pipeline | ❌ No | ❌ No | Linear, ordered workflows |
+| Peer-to-Peer | ❌ No | ✅ Yes | Ad-hoc collaboration |
+| Blackboard | ❌ Shared state | ✅ Partial | Collaborative document building |
+| Adversarial | ✅ Judge | ❌ Sequential | Verification, red-teaming |
+
+Hub-and-spoke is Anthropic's recommended default because the coordinator gives a single place to put retry logic, fallback decisions, and result synthesis — which sequential and peer-to-peer scatter, and blackboard makes implicit.
+
+### Key facts
+- Hub-and-spoke is Anthropic's documented pattern for multi-agent orchestration in Claude Code
+- The coordinator is the single point of control; subagents are stateless workers
+- All inter-subagent communication routes through the coordinator — spokes never talk to each other directly
+- See also: [[foreground-subagent-error-handling]] (section 14) for how the Agent tool surfaces partial output on errors
+
+---
+
+---
+
+## 25. Agent Escalation Design — Self-Reported Confidence Scores
+
+### Self-reported confidence scores are unreliable complexity proxies
+
+When an agent generates a confidence score for its own answer (e.g. "45% confident"), that score reflects the model's *internal uncertainty estimate*, not the actual difficulty or ambiguity of the case. These two things can diverge significantly:
+
+| Situation | Self-reported confidence | Actual case complexity |
+|---|---|---|
+| Clear evidence, familiar phrasing | High | Low — resolve directly |
+| Clear evidence, unfamiliar phrasing | **Low** | **Low — still resolve directly** |
+| Genuinely ambiguous evidence | Low | High — may warrant escalation |
+| Model uncertainty about its own training | Low | Low — evidence is the ground truth |
+
+A low confidence score should **not** automatically trigger escalation. The correct signal is the **quality of the supporting evidence**, not the score.
+
+### Correct escalation criteria
+
+Escalate when:
+- The retrieved documentation or account data is **genuinely ambiguous or contradictory**
+- The case involves **policy exceptions** requiring human judgement
+- The stakes are high and the evidence does not clearly support a single answer
+
+Do **not** escalate when:
+- Supporting evidence clearly and unambiguously supports the answer, regardless of the confidence score
+- The score is low due to unfamiliar phrasing or domain drift — check the evidence first
+
+### Why numeric thresholds are wrong
+
+Setting a rule like "escalate if confidence < 50%" treats the score as objective truth. It will:
+- Over-escalate easy cases where evidence is clear but phrasing is unusual
+- Under-escalate hard cases where evidence is weak but phrasing happens to match training data
+
+### Key facts
+- Self-reported confidence scores are unreliable proxies for actual case complexity
+- The decision to escalate should be driven by evidence quality, not confidence score magnitude
+- No category of question (e.g. billing proration) is automatically exempt from or guaranteed to trigger confidence-based escalation — the evidence is what matters
+- Build escalation logic around structured evidence fields (source reliability, contradictions found, policy match) rather than raw confidence numbers
