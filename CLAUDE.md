@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Purpose
 
-This is a **documentation-only knowledge base** — there is nothing to build, test, or run. It stores reusable reference material for the Anthropic Claude API and Python SDK.
+This is a **documentation-only knowledge base** — there is nothing to build, test, or run. It stores reusable reference material for the Anthropic Claude API and Python SDK, built specifically to prepare for the **Claude Certification exam**.
 
 ## Key Files
 
@@ -25,9 +25,18 @@ This is a **documentation-only knowledge base** — there is nothing to build, t
 
 Target model documented: `claude-sonnet-4-6`. Target SDK: `anthropic` (Python). Reference marked current as of August 2026.
 
+## Certification Study Workflow
+
+The primary use pattern is **exam question review**: the user shares a certification quiz question (usually as a screenshot), asks follow-up questions about it, and wants two things in every interaction:
+
+1. **Explain the concept** — answer the question clearly, correct any misconceptions the user raises, and give enough context to understand *why* the correct answer is right and the wrong answers are wrong.
+2. **Add it to the reference** — update `anthropic_api_reference.md` with the new knowledge immediately after explaining it.
+
+Always do both, in that order. Do not skip the explanation in favour of just editing the file.
+
 ## Updating the Reference from Q&A Sessions
 
-This repo doubles as a living reference — whenever a conversation yields new or clarified knowledge about the Anthropic API, update `anthropic_api_reference.md` immediately after answering. Apply these rules:
+This repo doubles as a living reference — whenever a conversation yields new or clarified knowledge about the Anthropic Claude API, update `anthropic_api_reference.md` immediately after answering. Apply these rules:
 
 **What to capture**
 - Any API behavior, parameter, or pattern not already covered in the document

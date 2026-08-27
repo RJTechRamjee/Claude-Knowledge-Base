@@ -107,6 +107,18 @@ Claude Code hooks
 ├── Stop            → end of turn, observational only
 ├── matcher         → regex; scope hook to specific tool(s); no matcher = fires for all
 └── updatedInput    → does NOT propagate between hooks; each hook sees original input
+
+.mcp.json env var expansion
+├── ${VAR}            → blank if unset (or parse failure), no fallback
+├── ${VAR:-default}   → falls back to `default` if unset, everywhere
+└── scope             → works in command, args, env, url, AND headers (not just env)
+
+MCP server authentication
+├── headers            → static, hand-rotated credential
+├── headersHelper       → runs script fresh per connection (dynamic tokens, Kerberos)
+│                       (also called apiKeyHelper)
+├── oauth block         → only when a real OAuth authorization server exists
+└── transport (http/sse/stdio) → orthogonal to auth, never carries auth logic itself
 ```
 
 *Kept in a separate file so the main reference sections can grow without renumbering.*

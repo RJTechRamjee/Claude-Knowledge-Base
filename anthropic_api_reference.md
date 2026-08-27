@@ -4,6 +4,41 @@
 
 ---
 
+## Contents
+
+**Next available section number: 29** — when adding a new section, use this number and bump it here.
+
+1. [Tool Choice](#1-tool-choice)
+2. [Content Block Types](#2-content-block-types)
+3. [Stop Reasons](#3-stop-reasons)
+4. [Built-in (Standard) Tools](#4-built-in-standard-tools)
+5. [Local Tool Definition](#5-local-tool-definition)
+6. [Current Models and Pricing](#6-current-models-and-pricing)
+7. [Session Resumption — The API Is Stateless](#7-session-resumption-the-api-is-stateless)
+8. [Message Roles](#8-message-roles)
+9. [Top-level Request Parameters](#9-top-level-request-parameters)
+10. [Response Object Fields](#10-response-object-fields)
+11. [Multi-turn Tool Loop Pattern](#11-multi-turn-tool-loop-pattern)
+12. [Session Management (Claude Code CLI)](#12-session-management-claude-code-cli)
+13. [maxTurns](#13-maxturns)
+14. [Multi-Instance Review Architecture](#14-multi-instance-review-architecture)
+15. [Structured Output — Handling Missing Data in Tool Schemas](#15-structured-output-handling-missing-data-in-tool-schemas)
+16. [Claude Code Skills – Scope and Resolution](#16-claude-code-skills-scope-and-resolution)
+17. [Context Window Management in Long Sessions](#17-context-window-management-in-long-sessions)
+18. [Path-Scoped Rules and Symlinks in Claude Code](#18-path-scoped-rules-and-symlinks-in-claude-code)
+19. [Prompt Structuring — XML Tags for Category Isolation](#19-prompt-structuring-xml-tags-for-category-isolation)
+20. [Claude Code Permission Modes](#20-claude-code-permission-modes)
+21. [Claude Code Hooks — Hook Types and Enforcement](#21-claude-code-hooks-hook-types-and-enforcement)
+22. [Claude Code Rules — `.claude/rules/` and Path-Scoped Loading](#22-claude-code-rules-clauderules-and-path-scoped-loading)
+23. [Claude Code Tool Selection — Bash vs. Read / Glob / Grep](#23-claude-code-tool-selection-bash-vs-read-glob-grep)
+24. [Multi-Agent Architecture — Hub-and-Spoke Pattern](#24-multi-agent-architecture-hub-and-spoke-pattern)
+25. [Agent Escalation Design — Self-Reported Confidence Scores](#25-agent-escalation-design-self-reported-confidence-scores)
+26. [MCP Server Resources — @ Mention Reference Syntax](#26-mcp-server-resources-mention-reference-syntax)
+27. [MCP Config — Environment Variable Expansion in `.mcp.json`](#27-mcp-config-environment-variable-expansion-in-mcpjson)
+28. [MCP Server Authentication — `headers` vs `headersHelper` vs `oauth`](#28-mcp-server-authentication-headers-vs-headershelper-vs-oauth)
+
+---
+
 ## 1. Tool Choice
 
 Controls whether and how Claude uses tools.
@@ -88,6 +123,38 @@ response = client.messages.create(
 Why `auto` fails here: an ambiguous ticket might cause Claude to reply *"I'm not sure how to classify this"* in plain text instead of calling any tool — breaking the guarantee of a structured extraction result for every ticket. `any` removes that escape hatch.
 
 Why regex pre-classification fails: fragile keyword matching misroutes tickets. Letting Claude read the ticket and pick among all registered tools (`any`) uses semantic understanding instead.
+
+### Extended thinking — tool_choice compatibility
+
+When extended thinking is enabled, only `"auto"` and `"none"` are compatible `tool_choice` values. Using `"any"` or `"tool"` with extended thinking results in an API error:
+
+```
+"Thinking may not be enabled when tool_choice forces tool use."
+```
+
+| `tool_choice` value | Compatible with extended thinking? |
+|---|---|
+| `{"type": "auto"}` | ✅ Yes |
+| `{"type": "none"}` | ✅ Yes |
+| `{"type": "any"}` | ❌ No — forces tool call, incompatible |
+| `{"type": "tool", "name": "..."}` | ❌ No — forces tool call, incompatible |
+
+**Remedy:** set `tool_choice` to `"auto"` and use prompt engineering to encourage tool use:
+
+```python
+response = client.messages.create(
+    model="claude-sonnet-4-6",
+    thinking={"type": "enabled", "budget_tokens": 5000},
+    tools=[my_tool],
+    tool_choice={"type": "auto"},   # ← only valid forcing-free mode with thinking
+    messages=[{
+        "role": "user",
+        "content": "Use the search tool to find information about X."  # prompt nudge
+    }]
+)
+```
+
+Extended thinking is also incompatible with: streaming (in some SDK versions), `temperature` values other than 1, and `top_p` / `top_k` overrides.
 
 ---
 
@@ -824,6 +891,37 @@ When a field is `required` **and** typed as `number`, Claude *must* return a num
 ### General rule
 If a field may genuinely be absent in the source data, **remove it from `required[]`** rather than forcing Claude to invent a value or corrupting the type. Add a companion `_source` or `_confidence` enum to preserve downstream filterability.
 
+### JSON schema guarantees syntax, not semantic correctness
+
+A tool-use schema enforces:
+- Fields are present (if `required`)
+- Values have the declared types (`number`, `string`, etc.)
+- Enum fields match one of the allowed values
+
+A tool-use schema **cannot** enforce:
+- Cross-field arithmetic relationships (e.g. `sum(line_items) == total`)
+- Business logic constraints (e.g. `end_date > start_date`)
+- Consistency between independently extracted values
+
+**Invoice extraction example:** Even when both `line_items[].amount` and `invoice_total` are extracted and typed correctly, a schema will not detect when their values are arithmetically inconsistent. Claude returns syntactically valid JSON; the mismatch is a semantic error invisible to the schema validator.
+
+The fix is a post-extraction validation step in application code:
+
+```python
+result = run_extraction_tool(invoice_text)
+
+calculated_total = sum(item["amount"] for item in result["line_items"])
+if abs(calculated_total - result["invoice_total"]) > 0.01:
+    flag_for_human_review(result, calculated_total)
+```
+
+**What does NOT fix this:**
+- Adding more `required` fields — `required` only enforces presence, not relationships between values
+- Changing `tool_choice` mode — `tool_choice` controls which tool fires, not arithmetic validation
+- Resending the schema on follow-up turns — the schema is not hallucinated; the data mismatch is in the extracted values
+
+Validation logic for cross-field semantic rules must live **outside the schema**, in your application code.
+
 ---
 
 ## 16. Claude Code Skills – Scope and Resolution
@@ -1046,6 +1144,47 @@ Claude reads `findings.md` before answering → facts survive context compressio
 ### General rule: externalize findings that must survive context compression
 
 Any fact that needs to be reliably accessible later in a long session should be written to a file. Context is volatile; files are not.
+
+### Lost-in-the-middle problem — aggregated multi-agent documents
+
+LLMs attend most strongly to content at the **beginning and end** of a long input. Content buried in the middle of a large aggregated document is systematically under-attended, regardless of its importance. This causes findings from middle sections to be dropped or underweighted in synthesis steps.
+
+**Symptom:** a synthesis step omits a finding that was present in the third of five sections of a long combined document.
+
+**Root cause:** positional bias, not model quality. The model processed the content but did not weight it equally because of its position.
+
+**Correct fix — key-findings summary at top + explicit section headings:**
+
+```markdown
+## Key Findings Summary
+- Market sizing: TAM $4.2B, growing 12% YoY
+- Competitor pricing: median $120/seat, range $80–$200
+- **Regulatory risk: GDPR Article 22 requires human review for automated decisions** ← surfaced early
+- Customer sentiment: NPS 42, churn driven by onboarding friction
+- Distribution channels: direct sales 68%, partner 32%
+
+---
+
+## 1. Market Sizing
+[full detail...]
+
+## 2. Competitor Pricing
+[full detail...]
+
+## 3. Regulatory Risk
+[full detail...]
+...
+```
+
+The summary at the top ensures all critical findings are seen in the high-attention zone, regardless of where they sit in the body. Explicit headings give the model structural anchors to attend to each section.
+
+**Why other approaches fail:**
+
+| Approach | Why it fails |
+|---|---|
+| Split into two shorter docs (no summary/headings) | Reduces length but middle-drop-off can still occur within each half |
+| Instruct synthesis step to re-read document twice | Doesn't fix positional bias structurally; adds latency |
+| Reorder sections so important finding is last | Treats one symptom, not the cause; ordering may change in future runs |
 
 ---
 
@@ -1535,10 +1674,33 @@ All API handlers must validate input with zod before touching the DB.
 
 This rule stays out of context until Claude reads (or edits) a file matching the glob. It is injected only when a matching file enters the working context — not at launch, and not for unrelated files.
 
+### User-level vs project-level rules — load order and conflict resolution
+
+Both `~/.claude/rules/` (user-level) and `.claude/rules/` (project-level) files load unconditionally when they have no `paths` field. **User-level rules load before project-level rules.**
+
+However, load order does **not** guarantee deterministic conflict resolution. When two unconditional rules give conflicting guidance for the same behaviour, Claude sees both instructions in context simultaneously and may choose between them arbitrarily. There is no strict "project overrides user" guarantee for rules.
+
+**This is different from Skills:**
+
+| Feature | Conflict resolution |
+|---|---|
+| **Skills** | Only one skill fires per invocation — the most specific level wins (project > user). The other is never loaded. |
+| **Rules** | Both files load into context simultaneously. Claude sees two contradictory instructions and must resolve them linguistically — which is non-deterministic. |
+
+**The fix is structural, not sequential:** if two rules conflict, remove or reconcile the conflict rather than relying on load order. Options:
+- Consolidate into a single file at one level
+- Add a `paths:` field to one rule so they never both apply in the same context
+- Remove the user-level rule if the project rule supersedes it
+
+**What does NOT work:**
+- Assuming project-level always wins (it does not — both load)
+- Assuming user-level is ignored when a same-named project file exists (both files load independently; the name match is irrelevant)
+
 ### Key facts
 - Omitting `paths` does **not** disable a rule and does **not** scope it to the `.claude/rules/` directory itself — it makes the rule unconditional (always loaded)
 - `paths` patterns are project-root-relative globs, matched against files Claude actually reads/edits during the session
 - A file with `paths` and a file without `paths` can coexist in the same `.claude/rules/` folder with completely different load timing
+- User-level rules load before project-level rules, but this is not a strict override — conflicting unconditional rules are non-deterministic; reconcile conflicts structurally
 - This mirrors the [[path-scoped rules]] behavior in section 18, but that section covers symlink path-matching; this section covers the `paths`-vs-no-`paths` load-trigger distinction
 
 ### `.claude/` — recognized subfolders and files (project-level)
@@ -1580,10 +1742,101 @@ Choosing the wrong tool produces no result or a misleading one. The rule: **stat
 
 Only **Bash** actually executes the command and returns its stdout and stderr (including the stack trace), which is what is needed to reproduce and observe a failure.
 
+### Finding files across multiple naming conventions — still Glob, not Grep
+
+A task like "find every test file, where naming mixes `.test.tsx`, `.spec.tsx`, and legacy `Test.tsx`" is still a pure **path-pattern** problem — having several conventions just means running Glob with several patterns (or one call per pattern), not switching tools:
+
+```python
+Glob(pattern="**/*.test.tsx")
+Glob(pattern="**/*.spec.tsx")
+Glob(pattern="**/*Test.tsx")
+```
+
+The classic trap here is reaching for **Grep** with a pattern like "the word `test` anywhere in the file" — that searches **file contents**, not file names. It fails in both directions: it can match unrelated files that merely mention testing in a comment/string, and it can miss genuine test files whose contents never contain the literal word "test". Grep is for content; Glob is for path/name patterns — mixing them up is the same category error as using Bash+manual-Read to answer a pure name-matching question (previous subsection).
+
+### Grep — `type` parameter and multiline mode
+
+#### Scoping to a language with `type`
+The `type` parameter restricts Grep to files of a given language, equivalent to `rg --type`. This is more efficient than a glob and works repo-wide:
+
+```python
+# Search only Python files
+Grep(pattern="BaseHandler", type="py")
+
+# Search only TypeScript files
+Grep(pattern="interface User", type="ts")
+```
+
+Common type values: `py`, `ts`, `js`, `rust`, `go`, `java`, `rb`, `cs`, `cpp`.
+
+#### Matching patterns that span multiple lines — `multiline: true`
+
+By default, Grep matches within single lines only. If a class definition (or any construct) wraps across lines, a single-line search misses it. Enable `multiline: true` to allow the pattern to cross line boundaries:
+
+```python
+# Matches both:
+#   class OrderHandler(BaseHandler):
+#   class OrderHandler(\n    BaseHandler, LoggingMixin\n):
+Grep(
+    pattern=r"class \w+\([^)]*BaseHandler",
+    type="py",
+    multiline=True
+)
+```
+
+Without `multiline=True`, the second form is invisible to Grep — the newline breaks the match.
+
+#### `output_mode` does NOT affect search thoroughness
+
+`output_mode` controls the *format* of results, not how deeply Grep searches:
+- `"files_with_matches"` — returns file paths only (default)
+- `"content"` — returns matching lines with context
+- `"count"` — returns match counts per file
+
+Switching from `"files_with_matches"` to `"content"` does not make Grep search more files or match more patterns. Use `multiline: true` to fix missed multi-line matches.
+
+#### Wrong alternatives
+- **Glob + Read every file** — lists files correctly but requires reading each one in full to check content; does not scale across large codebases
+- **Bash(grep …)** — works but bypasses the optimised tool and requires shell permissions
+
+### `Edit` vs `Write` — surgical change vs. whole-file reformat
+
+Use **`Edit`** for targeted changes to a few known strings. Use **`Write`** when nearly every line of a file must be changed (e.g., re-indenting a generated 900-line file).
+
+| Scenario | Right tool | Wrong tool (and why) |
+|---|---|---|
+| Fix a single function name in a file | **`Edit`** | `Write` — rewrites the entire file unnecessarily |
+| Reformat indentation across 900 lines | **`Write`** (after `Read`) | `Edit` × 900 — hundreds of fragile per-line calls; `Grep` — read-only, does not write back |
+| Replace a hard-coded string in 3 places | **`Edit`** with `replace_all` | `Write` — overkill |
+| Normalize whitespace on nearly every line | **`Write`** (after `Read`) | `Edit` per line — infeasible and error-prone at scale |
+
+#### The read-modify-write pattern for whole-file reformatting
+
+1. **`Read`** — confirm current file state (even if read earlier; ensures no concurrent edits)
+2. Apply transformation in memory (re-indent, reformat, etc.)
+3. **`Write`** — replace the entire file in a single call
+
+```python
+# Claude's internal flow for whole-file reformat:
+content = Read(file_path="generated_output.py")   # step 1: confirm state
+reformatted = reindent(content)                    # step 2: transform
+Write(file_path="generated_output.py",             # step 3: single write
+      content=reformatted)
+```
+
+**Why not `Edit` per line?** `Edit` requires `old_string` to match exactly. On a 900-line file with inconsistent whitespace on nearly every line, issuing ~900 Edit calls is slow, fragile (any mismatch aborts), and was not designed for this workload.
+
+**Why not `Grep`?** `Grep` is a **read-only** search tool. Retrieving lines with `output_mode: "content"` returns matching text — it does not rewrite or modify the file in place.
+
+**Why not `Glob`?** `Glob` returns file *paths* sorted by modification time. It has no ability to read or rewrite file content.
+
 ### Key facts
 - Use `Bash` whenever you need a process to run and return its live output
 - Reading a config file is not a substitute for running the program
 - Prefer the dedicated `Read`, `Glob`, `Grep` tools over their Bash equivalents for pure file operations — they are faster and require fewer permissions
+- Use `type` to scope Grep to a language repo-wide; use `multiline: true` when patterns span line breaks
+- `output_mode` changes result format only — it does not affect which lines are matched
+- For whole-file reformats: `Read` → transform → `Write`; never `Edit` per line at scale
 
 ---
 
@@ -1626,6 +1879,63 @@ When a subagent hits a transient error (e.g. network failure during web search),
 | Abort and surface the error | Error is critical, task cannot continue |
 
 **Do NOT** put retry logic inside each subagent — that duplicates logic across spokes and breaks the centralized control that is the defining benefit of hub-and-spoke.
+
+### Partial results — preserve completed work on subagent failure
+
+When one subagent in a parallel batch fails with an unrecoverable error, the coordinator should **synthesize from the completed results and annotate the gap** — not abort the entire pipeline.
+
+**Correct pattern:**
+```python
+results = {}
+errors = {}
+
+for agent_name, result in subagent_outputs.items():
+    if result.is_error:
+        errors[agent_name] = result.error_context   # capture what failed and why
+    else:
+        results[agent_name] = result.content        # keep completed work
+
+# Synthesize what we have; surface the gap honestly
+report = synthesize(results)
+for agent_name, ctx in errors.items():
+    report.add_coverage_gap(agent_name, reason=ctx)  # annotate, don't fabricate
+```
+
+**Why each alternative is wrong:**
+
+| Approach | Why it fails |
+|---|---|
+| Re-run all five subagents | Wastes four completed results; adds latency and cost for no gain |
+| Abort the entire pipeline | Discards useful work; one connection error says nothing about the other four results |
+| Fabricate content to fill the gap | Silently corrupts the report; downstream readers cannot distinguish real from invented |
+| Synthesize partial + annotate gap | ✅ Maximally useful and honest |
+
+**The principle:** completed subagent work has value even when the batch is incomplete. Aborting on any single failure treats partial results as worthless — almost never true in research or data-gathering pipelines. The coordinator's job is to make the most of what it has and be transparent about what it couldn't get.
+
+### What subagents should report — transient vs unrecoverable failures
+
+The rule: **subagents report the final outcome, not the retry history.**
+
+| Situation | What the subagent reports to coordinator |
+|---|---|
+| Transient error, **resolved autonomously** | ✅ **Success** — coordinator doesn't need the retry history |
+| Unrecoverable error, subagent **cannot continue** | ✅ **Error context** — coordinator decides retry/fallback |
+
+**Transient failure resolved locally → report success only:**
+
+If a subagent retries a step internally (e.g. a DB connection reset that succeeds on the third attempt), the task completed. The coordinator receives a success summary — not an error, not partial results, not retry detail. Surfacing resolved transient failures to the coordinator adds noise without value.
+
+**Unrecoverable failure → report error context:**
+
+If the subagent exhausts retries or hits a non-transient failure, it reports the error so the coordinator can decide: retry the subagent, invoke a fallback, or proceed without that result.
+
+**Common wrong responses to a resolved transient failure:**
+
+| Wrong response | Why it fails |
+|---|---|
+| Report partial results (omit the step that initially failed) | Factually wrong — the step succeeded; reporting it as missing misrepresents the outcome |
+| Escalate and ask coordinator for new credentials | Wrong diagnosis — transient connection resets ≠ expired credentials |
+| Report `is_error: true` with retry detail | The task succeeded; `is_error` is for actual failures, not resolved retries |
 
 ### Why not put error handling in the subagent?
 
@@ -1724,3 +2034,129 @@ Setting a rule like "escalate if confidence < 50%" treats the score as objective
 - The decision to escalate should be driven by evidence quality, not confidence score magnitude
 - No category of question (e.g. billing proration) is automatically exempt from or guaranteed to trigger confidence-based escalation — the evidence is what matters
 - Build escalation logic around structured evidence fields (source reliability, contradictions found, policy match) rather than raw confidence numbers
+
+---
+
+## 26. MCP Server Resources — @ Mention Reference Syntax
+
+MCP servers expose two distinct mechanisms:
+- **Tools** — callable functions Claude invokes via tool use
+- **Resources** — readable documents or data Claude can pull into context
+
+### Referencing a resource inline in a prompt
+
+Use the prescribed **@ mention** syntax to include a specific MCP resource directly in a prompt, the same way you would reference a local file:
+
+```
+@<server-name>:<protocol>://<resource-path>
+```
+
+**Example** — server named `docs`, resource at `file://api/authentication`:
+```
+@docs:file://api/authentication
+```
+
+Claude fetches that resource and inlines it into the context. The developer can place this anywhere in their prompt message.
+
+### Why other approaches fail
+
+| Approach | Why it fails |
+|---|---|
+| Add `resources` field to `.mcp.json` | `.mcp.json` configures server connections (command, args, env). No `resources` field exists that auto-loads docs into every session. |
+| Ask Claude in plain language to "open the docs server" | No prescribed syntax — Claude may guess, access the wrong resource, or call `list_resources` instead. |
+| Call `list_resources` first, paste raw JSON | A manual workaround that bypasses the purpose of the @ mention syntax. |
+
+### Key facts
+- MCP **resources** → referenced with `@server:protocol://path` inline in the prompt
+- MCP **tools** → called by Claude via tool use during the agentic loop
+- The @ mention syntax is the prescribed way to point at a specific resource, equivalent to referencing a local file
+- The server name in the @ mention must match the name configured in `.mcp.json`
+
+---
+
+## 27. MCP Config — Environment Variable Expansion in `.mcp.json`
+
+`.mcp.json` supports shell-style variable expansion so machine-specific values (API keys, regions, ports) don't need to be hardcoded into a team-shared config file.
+
+### Syntax
+
+| Form | Behavior when `VAR` is unset |
+|---|---|
+| `${VAR}` | Expands to blank (or triggers a parse failure, depending on strictness) — no fallback exists |
+| `${VAR:-default}` | Expands to the literal `default` text — the fallback only triggers because a default was explicitly supplied |
+
+### Where expansion applies
+
+The expansion is a config-wide text substitution — it is **not** scoped to a single field. It works identically in:
+- `command`
+- `args`
+- `env`
+- `url`
+- `headers`
+
+**Example:**
+```jsonc
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "my-server-bin",
+      "args": ["--region", "${API_REGION:-us-east-1}"],
+      "env": { "API_KEY": "${MY_API_KEY}" }
+    }
+  }
+}
+```
+
+If `API_REGION` is unset on the host machine, Claude Code passes the literal string `us-east-1` as the `args` value — the same `${VAR:-default}` mechanic that works in `env` also works in `args` (and `url`/`headers`).
+
+### Common misconceptions
+
+| Claim | Why it's wrong |
+|---|---|
+| Default-value expansion only works inside `env`, not `args` | Expansion is config-wide; `args`, `url`, and `headers` all support the same `${VAR:-default}` syntax |
+| An unset variable always expands to an empty string | Only true for bare `${VAR}` with no default. `${VAR:-default}` overrides that behavior by design |
+| Claude Code requires every referenced variable to be set, or config parsing fails | A parse failure risk applies only to bare `${VAR}` (no default) left unset — supplying `:-default` is specifically what avoids that failure |
+
+### Key facts
+- `${VAR:-default}` is standard POSIX-shell-style parameter expansion, adopted by Claude Code for `.mcp.json`
+- Supplying a default is what makes an otherwise-unset variable resolve safely and predictably across machines
+- This lets a single `.mcp.json` be checked into git and shared across a team, while still tolerating machines where an optional env var (e.g. a region override) isn't set
+
+---
+
+## 28. MCP Server Authentication — `headers` vs `headersHelper` vs `oauth`
+
+MCP server configs in `.mcp.json` support three distinct authentication mechanisms, each suited to a different token lifecycle:
+
+| Mechanism | Use when | Behavior |
+|---|---|---|
+| `headers` (static) | The auth value is stable and rarely rotates | A hardcoded header value sits in config; rotating it requires manually editing the file |
+| `headersHelper` (also called `apiKeyHelper`) | The token must be generated dynamically — short-lived tokens, Kerberos, signed requests | Claude Code runs an external script/command on **each connection**; the script writes fresh header JSON to stdout, which is used for that connection |
+| `oauth` block (e.g. `authServerMetadataUrl`) | An actual OAuth authorization server exists | Claude Code discovers and drives the OAuth flow automatically against that server |
+
+### Example — `headersHelper`
+
+```jsonc
+{
+  "mcpServers": {
+    "kerberos-server": {
+      "url": "https://internal-mcp.example.com",
+      "headersHelper": "generate-kerberos-token.sh"
+    }
+  }
+}
+```
+
+`generate-kerberos-token.sh` runs fresh on every connection and prints the resulting header JSON (e.g. `{"Authorization": "Negotiate <token>"}`) to stdout — satisfying a "freshly minted per connection" requirement that a static value or an OAuth flow cannot.
+
+### Why the other two mechanisms don't fit a "freshly minted, no OAuth server" scenario
+
+- **Static `headers`** — a hardcoded token is minted once and reused until someone manually rotates the config file. This is the opposite of "freshly minted for every connection."
+- **`oauth` block** — exists specifically so Claude Code can discover and run a flow against a real OAuth authorization server. If no such server exists (e.g. auth is Kerberos-derived), there is nothing for `authServerMetadataUrl` to point at — the mechanism doesn't apply.
+- **Changing `--transport` (e.g. to `sse`)** — transport (`http`/`sse`/`stdio`) only affects how data is streamed over the wire. It carries no authentication logic of its own; auth is always handled via `headers`/`headersHelper`/`oauth`, independent of transport choice.
+
+### Key facts
+- `headersHelper`/`apiKeyHelper` = the mechanism for **dynamically generated, per-connection** credentials via an external script
+- `headers` = static, hand-rotated credentials
+- `oauth` block = only applicable when a real OAuth authorization server is in play
+- Transport (`http` vs `sse` vs `stdio`) is orthogonal to authentication — never conflate the two
