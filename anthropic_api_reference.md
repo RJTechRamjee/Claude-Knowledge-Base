@@ -81,6 +81,21 @@ Appear in `response.content` or in message `content` arrays.
 | `"tool_use"` | Claude wants to call a tool | Run tool → return `tool_result` → call API again |
 | `"max_tokens"` | Hit the `max_tokens` ceiling mid-response | Optionally continue by appending partial response |
 | `"stop_sequence"` | Hit a custom stop sequence you defined | Application-specific |
+| `"pause_turn"` | Claude paused mid-turn (e.g. awaiting human approval). Opus 4.6+ | Send next user message to resume |
+| `"refusal"` | Safety classifier declined. HTTP 200. Check `stop_details.category`. Opus 4.7+ | Handle gracefully; optionally use server-side fallbacks |
+
+**`pause_turn`** — added in Opus 4.6+. Claude pauses mid-turn (e.g. awaiting human confirmation before a risky action). Resume by sending the next user message; the loop continues.
+
+**`refusal`** — added in Opus 4.7+. Safety classifier declined the request. HTTP 200 returned. `response.stop_details` is populated **only** for this reason (fields: `type: "refusal"`, `category` e.g. `"cyber"` / `"bio"`, `explanation`). Always guard before reading `stop_details` — it is `null` for all other stop reasons.
+
+```python
+response = client.messages.create(...)
+if response.stop_reason == "refusal":
+    category = response.stop_details.category   # "cyber", "bio", etc.
+    print(f"Refused: {category}")
+elif response.stop_reason == "tool_use":
+    ...
+```
 
 **There is no "waiting for user input" stop reason.** The API is pure request-response — Claude does not wait. When Claude asks a question, `stop_reason` is `"end_turn"`. The conversation only continues when your code collects user input and makes the next `messages.create()` call.
 
@@ -141,10 +156,18 @@ while response.stop_reason == "tool_use":
 Anthropic-managed tools — no `input_schema` needed, no result handling required.
 
 ```python
-{"type": "web_search_20250305",   "name": "web_search"}         # Web search
-{"type": "bash_20250124",         "name": "bash"}                # Run bash commands
-{"type": "text_editor_20250124",  "name": "str_replace_editor"}  # Edit files
-{"type": "computer_use_20251022", "name": "computer"}            # Control computer
+# Current type strings (Opus 5 / 4.8 / 4.7 / 4.6, Sonnet 5 / 4.6)
+{"type": "web_search_20260209",   "name": "web_search"}                  # Web search (dynamic filtering)
+{"type": "web_fetch_20260209",    "name": "web_fetch"}                   # Web fetch (dynamic filtering)
+{"type": "bash_20250124",         "name": "bash"}                        # Run bash commands
+{"type": "text_editor_20250728",  "name": "str_replace_based_edit_tool"} # Edit files
+{"type": "computer_use_20251022", "name": "computer"}                    # Control computer
+{"type": "code_execution_20260521", "name": "code_execution"}            # Server-side code execution
+
+# Older models only (pre-Opus 4.6 / pre-Sonnet 4.6)
+{"type": "web_search_20250305",  "name": "web_search"}   # basic variant
+{"type": "web_fetch_20250910",   "name": "web_fetch"}    # basic variant
+# On Vertex AI: only web_search_20250305 is available (no web fetch)
 ```
 
 ### Built-in vs Local Tool Comparison
@@ -155,6 +178,8 @@ Anthropic-managed tools — no `input_schema` needed, no result handling require
 | Has `input_schema` | ❌ No | ✅ Yes |
 | Who runs the tool | Anthropic | You |
 | Needs second turn | ❌ No | ✅ Yes |
+
+> **Note:** Type strings are versioned and change between API versions. Always use the latest for your target model. Web search/fetch `_20260209` variants include dynamic domain filtering (`allowed_domains`/`blocked_domains`).
 
 ---
 
@@ -178,7 +203,45 @@ You define the schema; you run the tool and return the result.
 
 ---
 
-## 6. Session Resumption — The API Is Stateless
+## 6. Current Models and Pricing
+
+Use **exact model ID strings** — never append date suffixes (`claude-sonnet-4-6`, never `claude-sonnet-4-6-20251114`). Default to `claude-opus-5` unless the user specifies otherwise.
+
+| Model | Model ID | Context | Input $/1M | Output $/1M |
+|---|---|---|---|---|
+| Claude Fable 5 | `claude-fable-5` | 1M | $10.00 | $50.00 |
+| Claude Opus 5 | `claude-opus-5` | 1M | $5.00 | $25.00 |
+| Claude Opus 4.8 | `claude-opus-4-8` | 1M | $5.00 | $25.00 |
+| Claude Opus 4.7 | `claude-opus-4-7` | 1M | $5.00 | $25.00 |
+| Claude Opus 4.6 | `claude-opus-4-6` | 1M | $5.00 | $25.00 |
+| Claude Sonnet 5 | `claude-sonnet-5` | 1M | $2.00 | $10.00 |
+| Claude Sonnet 4.6 | `claude-sonnet-4-6` | 1M | $3.00 | $15.00 |
+| Claude Haiku 4.5 | `claude-haiku-4-5` | 200K | $1.00 | $5.00 |
+
+**Prices above are Anthropic first-party API rates.** Bedrock and Vertex AI have separate pricing.
+
+### Fast Mode (API-level, not CLI `/fast`)
+
+Separate from the Claude Code CLI `/fast` command. API fast mode applies to Claude Opus 5 and Opus 4.8 only:
+
+```python
+# Requires beta endpoint + beta flag + speed param — all three required
+client.beta.messages.create(
+    model="claude-opus-5",
+    max_tokens=4096,
+    speed="fast",                          # top-level param (not in extra_body)
+    betas=["fast-mode-2026-02-01"],
+    messages=[...],
+)
+```
+
+- Up to 2.5× higher output tokens/second at premium pricing ($10/$50 per MTok for Opus 5 fast)
+- Not available on Bedrock, Vertex, Foundry, or Batch API
+- A 429 on fast mode: retry with `speed` omitted to fall back to standard (note: switching speed invalidates prompt cache)
+
+---
+
+## 7. Session Resumption — The API Is Stateless
 
 **The Anthropic API has no session ID parameter.** A session ID alone carries no conversational content — the model only sees what is in `messages[]` for the current request. Passing a session ID to a non-existent parameter does nothing; the model starts fresh every call.
 
@@ -277,7 +340,7 @@ def resume_long_session(session_id, new_message):
 
 ---
 
-## 7. Message Roles
+## 8. Message Roles
 
 ```python
 {"role": "user",      "content": "..."}  # Human turn
@@ -287,28 +350,54 @@ def resume_long_session(session_id, new_message):
 
 ---
 
-## 8. Top-level Request Parameters
+## 9. Top-level Request Parameters
 
 ```python
 client.messages.create(
-    model=          "claude-sonnet-4-6",  # required
-    max_tokens=     1000,                 # required — hard ceiling on output
+    model=          "claude-opus-5",      # required — use claude-opus-5 by default
+    max_tokens=     1000,                 # required — hard ceiling on output tokens
     messages=       [...],                # required — conversation history
     system=         "You are...",         # optional — system prompt
     tools=          [...],                # optional — tool definitions
     tool_choice=    {...},                # optional — see section 1
-    temperature=    0.7,                  # optional — 0.0–1.0, default 1.0
-    top_p=          0.9,                  # optional — nucleus sampling
-    top_k=          50,                   # optional — top-k sampling
+    thinking=       {"type": "adaptive"}, # optional — adaptive thinking (current pattern)
+    output_config=  {                     # optional — output controls
+        "effort":   "high",              #   low | medium | high | xhigh | max (default: high)
+        "format":   {...},               #   structured output schema (replaces deprecated output_format)
+    },
     stop_sequences= ["STOP"],             # optional — custom stop strings
-    stream=         True,                 # optional — streaming mode
+    stream=         True,                 # optional — streaming mode (required for large max_tokens)
     metadata=       {"user_id": "123"},   # optional — request metadata
+    # temperature / top_p / top_k removed on Opus 4.7+ and Fable 5 (returns 400 if sent)
 )
 ```
 
+### Thinking parameter — current rules
+
+| Model | Correct `thinking` value | Notes |
+|---|---|---|
+| Fable 5 / Opus 5 | `{"type": "adaptive"}` or omit | `budget_tokens` returns 400; `disabled` also returns 400 on Fable 5 |
+| Opus 4.8 / 4.7 / Sonnet 5 | `{"type": "adaptive"}` | `budget_tokens` returns 400 |
+| Opus 4.6 / Sonnet 4.6 | `{"type": "adaptive"}` recommended | `budget_tokens` still works as transitional escape hatch |
+| Older (Haiku 4.5, etc.) | `{"type": "enabled", "budget_tokens": N}` | Required for thinking; min 1024, less than `max_tokens` |
+
+> `budget_tokens` is **deprecated** on 4.6 and **rejected with 400** on 4.7+. Always use `{"type": "adaptive"}` for new code on current models.
+
+### Effort levels (`output_config.effort`)
+
+Controls thinking depth and token spend without changing the model:
+
+| Level | Use for |
+|---|---|
+| `"low"` | Simple tasks, subagents, high-volume routes |
+| `"medium"` | Routine work where quality holds at lower cost |
+| `"high"` | Default — most tasks, coding, balanced quality |
+| `"xhigh"` | Coding and long-horizon agentic work (Opus 4.7+) |
+| `"max"` | When correctness matters more than cost |
+
 ---
 
-## 9. Response Object Fields
+## 10. Response Object Fields
 
 ```python
 response.id                    # unique message ID
@@ -324,7 +413,7 @@ response.usage.output_tokens   # tokens consumed by output
 
 ---
 
-## 10. Multi-turn Tool Loop Pattern
+## 11. Multi-turn Tool Loop Pattern
 
 ```python
 messages = [{"role": "user", "content": user_input}]
@@ -356,7 +445,7 @@ final = next(b.text for b in response.content if b.type == "text")
 
 ---
 
-## 11. Session Management (Claude Code CLI)
+## 12. Session Management (Claude Code CLI)
 
 Named sessions give you a human-readable, resumable handle for long-running tasks.
 
@@ -391,7 +480,7 @@ claude --resume "q3-security-audit"
 
 ---
 
-## 12. maxTurns
+## 13. maxTurns
 
 Controls how many agentic loop iterations Claude can take. **Not an API parameter** — enforced by your own loop logic.
 
@@ -483,7 +572,7 @@ Claude halts the loop at the turn boundary and returns whatever it has — no cr
 
 ---
 
-## 13. Multi-Instance Review Architecture
+## 14. Multi-Instance Review Architecture
 
 ### Why self-review misses issues (anchoring bias)
 When the same Claude instance that generates code is asked to review it within the same conversation, it is anchored to its own prior reasoning — it tends to justify decisions rather than question them. A fresh instance has no attachment to those decisions and reviews the output as a stranger would.
@@ -564,7 +653,7 @@ Claude Code invokes the Agent tool internally; the reviewer subagent receives on
 
 ---
 
-## 14. Structured Output — Handling Missing Data in Tool Schemas
+## 15. Structured Output — Handling Missing Data in Tool Schemas
 
 ### The fabrication problem
 When a field is `required` **and** typed as `number`, Claude *must* return a number. If the source data doesn't contain one, Claude invents a plausible value rather than violate the schema — silently corrupting data quality.
@@ -603,7 +692,7 @@ If a field may genuinely be absent in the source data, **remove it from `require
 
 ---
 
-## 15. Claude Code Skills – Scope and Resolution
+## 16. Claude Code Skills – Scope and Resolution
 
 Skills are filesystem-based (not API-hosted). They resolve at two levels:
 
@@ -752,7 +841,7 @@ Claude Code walks up the directory tree (same as CLAUDE.md), so a skill in a **p
 
 ---
 
-## 16. Context Window Management in Long Sessions
+## 17. Context Window Management in Long Sessions
 
 ### The context eviction problem
 
@@ -804,7 +893,7 @@ Any fact that needs to be reliably accessible later in a long session should be 
 
 ---
 
-## 17. Path-Scoped Rules and Symlinks in Claude Code
+## 18. Path-Scoped Rules and Symlinks in Claude Code
 
 ### How path-scoped rules work
 
@@ -850,7 +939,7 @@ Write path-scoped rules using relative project-root-relative patterns (`src/hand
 
 ---
 
-## 18. Prompt Structuring — XML Tags for Category Isolation
+## 19. Prompt Structuring — XML Tags for Category Isolation
 
 When a prompt defines multiple distinct categories (each with its own criteria, rules, and examples), **uniquely named XML tags** create unambiguous boundaries that prevent cross-contamination.
 
@@ -900,7 +989,7 @@ Use XML tags whenever a prompt has multiple **independent** sections that must n
 
 ---
 
-## 19. Claude Code Permission Modes
+## 20. Claude Code Permission Modes
 
 Controls what happens when Claude Code wants to run an action that hasn't been explicitly approved.
 
@@ -951,7 +1040,7 @@ The allowlist defines exactly what Claude can do. Everything else fails fast and
 
 ---
 
-## 20. Claude Code Hooks — Hook Types and Enforcement
+## 21. Claude Code Hooks — Hook Types and Enforcement
 
 Hooks are shell commands Claude Code runs automatically at lifecycle events. The critical distinction is whether a hook can **block** execution or only **observe** it.
 
@@ -1237,6 +1326,57 @@ Two hooks (wrong for transform + enforce):
 - `Notification` hooks fire after the fact and cannot prevent execution
 - Hook matchers can be scoped to specific tool names (not session-wide)
 - `PostToolUse` cannot block — the tool has already executed by the time it fires
+
+---
+
+## 22. Claude Code Rules — `.claude/rules/` and Path-Scoped Loading
+
+`.claude/rules/*.md` files carry the same YAML-frontmatter convention as skills. The presence or absence of a `paths` field in that frontmatter changes *when* the rule is loaded into context — it does not change *whether* it is a valid rule.
+
+### No `paths` field → unconditional, session-start load
+
+```yaml
+---
+# .claude/rules/general-style.md — no `paths` key
+---
+Use 2-space indentation. Prefer named exports.
+```
+
+Loads at session start with the **same priority as `.claude/CLAUDE.md`** — every session, regardless of which files are touched.
+
+### `paths` field present → conditional, per-file load
+
+```yaml
+---
+paths: ["src/api/**/*.ts"]
+---
+All API handlers must validate input with zod before touching the DB.
+```
+
+This rule stays out of context until Claude reads (or edits) a file matching the glob. It is injected only when a matching file enters the working context — not at launch, and not for unrelated files.
+
+### Key facts
+- Omitting `paths` does **not** disable a rule and does **not** scope it to the `.claude/rules/` directory itself — it makes the rule unconditional (always loaded)
+- `paths` patterns are project-root-relative globs, matched against files Claude actually reads/edits during the session
+- A file with `paths` and a file without `paths` can coexist in the same `.claude/rules/` folder with completely different load timing
+- This mirrors the [[path-scoped rules]] behavior in section 18, but that section covers symlink path-matching; this section covers the `paths`-vs-no-`paths` load-trigger distinction
+
+### `.claude/` — recognized subfolders and files (project-level)
+
+| Path | Purpose |
+|---|---|
+| `CLAUDE.md` (repo root, or `.claude/CLAUDE.md`) | Project instructions, loaded every session |
+| `.claude/rules/*.md` | Topic-scoped instructions, optionally gated by `paths:` frontmatter (this section) |
+| `.claude/skills/<name>/SKILL.md` | Reusable prompt packages, invoked as `/<name>` |
+| `.claude/agents/<name>.md` | Subagent definitions with isolated context |
+| `.claude/agent-memory/<name>/` | Persistent memory storage for project-scoped subagents |
+| `.claude/output-styles/<name>.md` | Custom system-prompt sections |
+| `.claude/settings.json` | Permissions, hooks, env vars, model defaults — committed |
+| `.claude/settings.local.json` | Personal per-project overrides — gitignored |
+| `.claude/.mcp.json` | Team-shared MCP server configs |
+| `.claude/.worktreeinclude` | Gitignored files to copy into new worktrees |
+
+User-level mirrors exist under `~/.claude/` for `CLAUDE.md`, `rules/`, `skills/`, `agents/`, `agent-memory/`, and `output-styles/`. Hooks have **no dedicated folder** — they are configured entirely inside `settings.json` under the `hooks` key (see section 21). Commands are not a separate folder either; slash commands are served by `skills/`.
 
 ---
 

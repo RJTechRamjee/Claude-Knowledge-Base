@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "billing": {
+      "command": "node",
+      "args": ["./mcp-servers/billing/index.js"]
+    }
+  }
+}

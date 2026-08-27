@@ -10,6 +10,8 @@ This is a **documentation-only knowledge base** — there is nothing to build, t
 
 **[anthropic_api_reference.md](anthropic_api_reference.md)** is the primary reference — numbered sections, grows freely without renumbering.
 
+**[claude_commands.md](claude_commands.md)** is the slash commands reference — when/why/how for all built-in commands and skills, most important ones first.
+
 **[mental_map.md](mental_map.md)** is the structural overview (ASCII tree of the full API + patterns). Kept separate so adding sections to the reference never forces a renumber. **Update this file whenever a new concept is added to the reference.** It covers:
 
 - Tool choice modes (`auto`, `any`, `tool`, `none`) and local tool definition schema

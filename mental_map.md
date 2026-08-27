@@ -1,16 +1,26 @@
 # Anthropic API – Quick Mental Map
 
 ```
+Models (default: claude-opus-5; never append date suffixes)
+├── claude-fable-5     → most capable, $10/$50 per MTok, 1M ctx
+├── claude-opus-5      → default, $5/$25 per MTok, 1M ctx
+├── claude-sonnet-5    → $2/$10 per MTok, 1M ctx
+├── claude-sonnet-4-6  → $3/$15 per MTok, 1M ctx
+└── claude-haiku-4-5   → $1/$5 per MTok, 200K ctx
+
 Request
 ├── messages[]         → conversation history (user / assistant turns)
 ├── tools[]            → tool definitions (built-in or local)
 ├── tool_choice        → auto | any | tool | none
 ├── system             → system prompt
+├── thinking           → {type: "adaptive"} current; budget_tokens deprecated/rejected on 4.7+
+├── output_config      → {effort: low|medium|high|xhigh|max, format: {...}}
 └── model, max_tokens  → always required
 
 Response
 ├── content[]          → text | tool_use blocks
-├── stop_reason        → end_turn | tool_use | max_tokens | stop_sequence
+├── stop_reason        → end_turn | tool_use | max_tokens | stop_sequence | pause_turn | refusal
+│   └── refusal only  → stop_details.category populated (e.g. "cyber", "bio")
 └── usage              → input_tokens, output_tokens
 
 You send back (when stop_reason == "tool_use")
@@ -73,6 +83,19 @@ MCP tool naming
 ├── format          → mcp__<server-name>__<tool-name>  (double underscore)
 ├── max length      → 64 characters
 └── matcher regex   → mcp__billing__(issue_refund|void_authorization|apply_credit)
+
+.claude/ directory (project-level)
+├── CLAUDE.md          → always loaded, top priority
+├── rules/*.md         → no `paths:` field  = unconditional load, same priority as CLAUDE.md
+│                      → has `paths:` field = loads only when a matching file is read/edited
+├── skills/<n>/SKILL.md → slash-command-invoked prompt packages
+├── agents/<n>.md      → subagent definitions
+├── agent-memory/<n>/  → persistent subagent memory
+├── output-styles/     → custom system-prompt sections
+├── settings.json      → permissions, hooks, env vars (committed)
+├── settings.local.json→ personal overrides (gitignored)
+├── .mcp.json          → team-shared MCP server config
+└── no dedicated hooks/ or commands/ folder — hooks live in settings.json, commands = skills/
 
 Claude Code hooks
 ├── PreToolUse      → runs BEFORE tool; can block OR rewrite input (updatedInput)
