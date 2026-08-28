@@ -8,7 +8,7 @@ This file is now an **index** into the reference content, which has been split b
 
 ## Contents
 
-**Next available section number: 32** — when adding a new section, use this number and bump it here.
+**Next available section number: 36** — when adding a new section, use this number and bump it here.
 
 ### Messages API Core — [reference/01-messages-api-core.md](reference/01-messages-api-core.md)
 Tool choice; content block types; stop reasons; built-in tools; local tool definitions; current models/pricing; message roles; request parameters; response fields.
@@ -40,6 +40,10 @@ CLI session management; path-scoped rules and symlinks; permission modes; `.clau
 20. [Claude Code Permission Modes](reference/03-claude-code-config.md#20-claude-code-permission-modes)
 22. [Claude Code Rules — `.claude/rules/` and Path-Scoped Loading](reference/03-claude-code-config.md#22-claude-code-rules-clauderules-and-path-scoped-loading)
 23. [Claude Code Tool Selection — Bash vs. Read / Glob / Grep](reference/03-claude-code-config.md#23-claude-code-tool-selection-bash-vs-read-glob-grep)
+32. [Blocking Bash in CI Pipelines — `--disallowedTools`](reference/03-claude-code-config.md#32-blocking-bash-in-non-interactive--ci-pipelines----disallowedtools)
+33. [Piped Stdin Size Limit — 10 MB Cap](reference/03-claude-code-config.md#33-piped-stdin-size-limit-in-claude-code--10-mb-cap)
+34. [`claudeMdExcludes` — Filtering CLAUDE.md Loading in Monorepos](reference/03-claude-code-config.md#34-claudemdexcludes--filtering-claudemd-loading-in-monorepos)
+35. [CLAUDE.md `@path` Import Syntax — Triggering vs. Suppressing Imports](reference/03-claude-code-config.md#35-claudemd-path-import-syntax-triggering-vs-suppressing-imports)
 
 ### Claude Code Skills and Hooks — [reference/04-claude-code-skills-and-hooks.md](reference/04-claude-code-skills-and-hooks.md)
 Skills scope and resolution; hooks (hook types, blocking vs. observational, enforcement patterns).

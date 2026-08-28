@@ -37,6 +37,68 @@ claude --name "q3-security-audit"
 claude --resume "q3-security-audit"
 ```
 
+### Resuming by explicit `session_id` — the CI/parallel-job pattern
+
+When multiple `claude -p` invocations run concurrently (e.g., parallel GitHub Actions jobs reviewing different PRs), `--continue` is unreliable because it attaches to the *most recent* session by timestamp — which may belong to a different concurrent job.
+
+The deterministic approach: capture the `session_id` from the first call's JSON output and pass it explicitly to the second call.
+
+```bash
+# Step 1 — first invocation, capture session_id from JSON output
+RESPONSE=$(git diff origin/main | claude -p 'review this PR for bugs' --output-format json)
+SESSION_ID=$(echo "$RESPONSE" | jq -r '.session_id')
+
+# Step 2 — second invocation, resume exactly that session
+claude -p 'what is the most critical issue you found?' --resume "$SESSION_ID"
+```
+
+`--output-format json` makes the CLI emit a JSON object whose `session_id` field is the stable identifier for that conversation. Passing it to `--resume` bypasses any "most recent" heuristic.
+
+### Cost tracking from the same JSON output — no new flags needed
+
+The Claude Code CLI's `--output-format json` payload already includes `total_cost_usd` and a **per-model cost breakdown**, alongside `result` and `session_id` — a pipeline that only reads `.result` can extend to cost tracking by reading more fields from the same response, no additional flags required.
+
+**Note on scope:** `total_cost_usd` is specific to the Claude Code CLI's JSON output — it is not a field the raw Messages API returns. Calling the API directly via `client.messages.create()` gives you `usage` (token counts) instead; cost must be computed from `usage` against the pricing table (section 6):
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+PRICE_PER_1M = {"claude-sonnet-4-6": {"input": 3.00, "output": 15.00}}
+
+response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": "summarize the changes in this release"}],
+    )
+
+price = PRICE_PER_1M[response.model]
+cost_usd = (
+    response.usage.input_tokens / 1_000_000 * price["input"]
+    + response.usage.output_tokens / 1_000_000 * price["output"]
+)
+
+print(response.content[0].text)  # existing behavior
+print(cost_usd)                  # new: total spend for this invocation
+```
+
+### `--continue` vs `--resume "$session_id"` — when each is correct
+
+| Approach | How it selects the session | Safe when concurrent? |
+|---|---|---|
+| `--continue` | Most recent session by timestamp | ❌ Attaches to wrong job if another runs simultaneously |
+| `--resume "name"` | Named session (set with `--name`) | ✅ if names are unique per job |
+| `--resume "$session_id"` | Exact session ID from JSON output | ✅ Always — explicit, not heuristic |
+
+### What does NOT work for cross-invocation context sharing
+
+| Wrong approach | Why it fails |
+|---|---|
+| Re-send original prompt verbatim | Starts a new conversation — Claude has no memory of the previous call |
+| `--no-session-persistence` (or similar) | Disables persistence; separate OS processes cannot share in-memory state |
+| `--continue` in parallel CI jobs | Attaches to *most recent* session — ambiguous under concurrency |
+
 ---
 
 ## 18. Path-Scoped Rules and Symlinks in Claude Code
@@ -92,9 +154,36 @@ Controls what happens when Claude Code wants to run an action that hasn't been e
 | Mode | Unapproved action | Human required? | Use for |
 |---|---|---|---|
 | `default` (interactive) | Prompts user | ✅ Yes | Normal development |
-| `acceptEdits` | Auto-approves file edits; prompts for everything else | ✅ For non-edit actions | Dev workflows with frequent file changes |
+| `acceptEdits` | Auto-approves file edits + common filesystem ops; prompts for shell commands and network requests | ✅ For non-edit/non-filesystem actions | Dev workflows with frequent file changes |
 | `dontAsk` | Denies silently — no prompt | ❌ No | CI/CD, automated pipelines |
 | `bypassPermissions` | Allows everything | ❌ No | Dangerous — avoid unless sandboxed |
+
+### `acceptEdits` — exact scope
+
+`acceptEdits` auto-approves a defined set of actions. Anything outside that set still requires explicit approval (or causes an abort in a CI/non-interactive context).
+
+**Auto-approved under `acceptEdits`:**
+- File writes (Edit, Write tools)
+- Common filesystem operations: `mkdir`, `mv`, `cp`
+
+**NOT auto-approved under `acceptEdits`:**
+- Arbitrary shell commands
+- Network requests (e.g. fetching a dependency list, calling an external API)
+- Any Bash invocation that goes beyond the filesystem operations listed above
+
+```bash
+# Example: this run aborts when Claude tries to make a network request
+claude -p "apply the lint fixes" --permission-mode acceptEdits
+# → File edits auto-approved ✅
+# → Network request to fetch updated dependency list → requires explicit approval ❌
+#   → aborts in CI (no human present)
+
+# Fix: explicitly allow the network tool
+claude -p "apply the lint fixes" --permission-mode acceptEdits --allowedTools WebFetch
+# or add a permissions.allow rule for the specific action
+```
+
+**Mental model:** the mode is named for what it auto-approves — *edits* and basic filesystem movement. Anything outside that scope still gates on a human or an explicit `--allowedTools` / `permissions.allow` entry.
 
 ### `dontAsk` — the CI-safe mode
 
@@ -184,7 +273,107 @@ However, load order does **not** guarantee deterministic conflict resolution. Wh
 - Assuming project-level always wins (it does not — both load)
 - Assuming user-level is ignored when a same-named project file exists (both files load independently; the name match is irrelevant)
 
+### Symlinks in `.claude/rules/` — sharing rules across repositories
+
+`.claude/rules/` resolves symlinks normally. Symlinks to an external shared folder (outside the repository) are a **supported pattern** for keeping rules in sync across multiple repos from a single source of truth.
+
+**What is supported:**
+- Symlinking individual rule files: `ln -s ~/shared-rules/security.md .claude/rules/security.md`
+- Symlinking an entire rules directory: `ln -s ~/shared-rules .claude/rules`
+- Pointing symlinks to locations **outside** any git repository (no submodule requirement)
+- Claude Code has **circular symlink detection** — infinite loops are caught
+
+**What the architect must verify:**
+
+Symlink targets are filesystem paths — they must exist on **each developer's machine** independently. If a developer clones the repo without having the shared source at the expected path, the symlink is dead and the rule silently goes missing.
+
+```
+Repo structure (committed):
+  .claude/rules/security.md → ~/org-shared-rules/security.md  (symlink)
+
+Developer A: ~/org-shared-rules/ exists → ✅ rule loads
+Developer B: ~/org-shared-rules/ missing → ❌ symlink is dead, rule not loaded
+```
+
+Document the symlink setup in onboarding so all developers clone or install the shared source at the expected path before opening the project.
+
+**Comparison with skills symlinks** (see [[skills-scope-and-resolution]] section 16):
+
+| | `.claude/rules/` symlinks | `.claude/skills/` symlinks |
+|---|---|---|
+| Supported? | ✅ | ✅ |
+| Individual file symlinks? | ✅ | ✅ |
+| Directory symlinks? | ✅ | ✅ |
+| Requires submodule? | ❌ No | ❌ No |
+| Auto-updates when source changes? | ✅ Yes (live symlink) | ✅ Yes (live symlink) |
+| Per-developer setup required? | ✅ Yes (source must exist at path) | ✅ Yes |
+
+### `paths` glob pattern semantics — `*` vs `**`
+
+The `paths` field (and skill `paths` frontmatter) accepts a YAML list of glob patterns. The critical distinction:
+
+| Pattern token | Matches | Crosses `/`? |
+|---|---|---|
+| `*` | Any characters within a **single directory segment** | ❌ No |
+| `**` | Zero or more **directory levels** | ✅ Yes |
+
+**Practical examples:**
+
+| Pattern | Matches | Misses |
+|---|---|---|
+| `**/*.test.tsx` | `.test.tsx` files at **any depth** in the project | Nothing — most inclusive |
+| `src/**/*.test.tsx` | `.test.tsx` files anywhere under `src/` | Files outside `src/` |
+| `**/__tests__/*.tsx` | `.tsx` files in any `__tests__/` directory | Colocated tests, `tests/` dirs, files outside `__tests__/` |
+| `src/components/*.test.tsx` | `.test.tsx` directly in `src/components/` | Nested subdirectories, other locations |
+
+**Rule:** To match a file extension at any directory depth across the whole project, use `**/*.ext`. Single `*` never crosses a `/` boundary.
+
+**YAML syntax note:** `paths` is a **list**, even for a single pattern. A bare string is invalid frontmatter:
+
+```yaml
+# ❌ Wrong — bare string, not a list
+paths: "terraform/**/*"
+
+# ✅ Correct — list with one item
+paths:
+  - "terraform/**/*"
+```
+
+**Complete example — `.claude/rules/terraform.md`:**
+
+````markdown
+---
+paths:
+  - "terraform/**/*"
+---
+
+# Terraform Conventions
+
+Apply these rules to any file under `terraform/`, at any subfolder depth.
+
+## Formatting
+- Run `terraform fmt` conventions: 2-space indentation, aligned `=` in argument blocks.
+- One resource or module block per logical unit — do not combine unrelated resources in a single block.
+
+## Tagging
+Every `aws_*` resource that supports `tags` must include:
+```hcl
+tags = {
+  Environment = var.environment
+  Team        = "infra"
+  ManagedBy   = "terraform"
+}
+```
+
+## Naming
+- Resource names use `snake_case`, prefixed with the service: `aws_s3_bucket.logs_bucket`, not `aws_s3_bucket.bucket1`.
+- Variable names must match their `.tfvars` counterpart exactly — no aliasing.
+````
+
+Because this file carries `paths`, it stays out of context until Claude touches a file matching `terraform/**/*` — a file at `terraform/main.tf` or `terraform/modules/vpc/network.tf` both trigger it; a file at `src/terraform-docs.md` does not.
+
 ### Key facts
+- `.claude/rules/` is scanned **recursively** for `.md` files — organizing rules into subdirectories (e.g. `frontend/`, `backend/`) is a pure maintainability convention and does not affect discovery or loading; each file's own `paths` frontmatter (or lack thereof) still governs its load behavior regardless of nesting
 - Omitting `paths` does **not** disable a rule and does **not** scope it to the `.claude/rules/` directory itself — it makes the rule unconditional (always loaded)
 - `paths` patterns are project-root-relative globs, matched against files Claude actually reads/edits during the session
 - A file with `paths` and a file without `paths` can coexist in the same `.claude/rules/` folder with completely different load timing
@@ -193,20 +382,46 @@ However, load order does **not** guarantee deterministic conflict resolution. Wh
 
 ### `.claude/` — recognized subfolders and files (project-level)
 
-| Path | Purpose |
-|---|---|
-| `CLAUDE.md` (repo root, or `.claude/CLAUDE.md`) | Project instructions, loaded every session |
-| `.claude/rules/*.md` | Topic-scoped instructions, optionally gated by `paths:` frontmatter (this section) |
-| `.claude/skills/<name>/SKILL.md` | Reusable prompt packages, invoked as `/<name>` |
-| `.claude/agents/<name>.md` | Subagent definitions with isolated context |
-| `.claude/agent-memory/<name>/` | Persistent memory storage for project-scoped subagents |
-| `.claude/output-styles/<name>.md` | Custom system-prompt sections |
-| `.claude/settings.json` | Permissions, hooks, env vars, model defaults — committed |
-| `.claude/settings.local.json` | Personal per-project overrides — gitignored |
-| `.claude/.mcp.json` | Team-shared MCP server configs |
-| `.claude/.worktreeinclude` | Gitignored files to copy into new worktrees |
+| Path | Committed? | Purpose |
+|---|---|---|
+| `CLAUDE.md` (repo root, or `.claude/CLAUDE.md`) | ✅ Yes | Project instructions, loaded every session |
+| `CLAUDE.local.md` (repo root) | ❌ Gitignored | Personal instructions for this developer only — never committed |
+| `.claude/rules/*.md` | ✅ Yes | Topic-scoped instructions, optionally gated by `paths:` frontmatter (this section) |
+| `.claude/skills/<name>/SKILL.md` | ✅ Yes | Reusable prompt packages, invoked as `/<name>` |
+| `.claude/agents/<name>.md` | ✅ Yes | Subagent definitions with isolated context |
+| `.claude/agent-memory/<name>/` | ✅ Yes | Persistent memory storage for project-scoped subagents |
+| `.claude/output-styles/<name>.md` | ✅ Yes | Custom system-prompt sections |
+| `.claude/settings.json` | ✅ Yes | Permissions, hooks, env vars, model defaults |
+| `.claude/settings.local.json` | ❌ Gitignored | Personal per-project overrides |
+| `.claude/.mcp.json` | ✅ Yes | Team-shared MCP server configs |
+| `.claude/.worktreeinclude` | ❌ Gitignored | Files to copy into new worktrees |
+
+**`CLAUDE.local.md`** is the gitignored personal counterpart to `CLAUDE.md` — analogous to `settings.local.json` vs `settings.json`. Use it for instructions that are real (enforced by the session, not just conversational preference) but personal (must not be committed to the shared repo).
 
 User-level mirrors exist under `~/.claude/` for `CLAUDE.md`, `rules/`, `skills/`, `agents/`, `agent-memory/`, and `output-styles/`. Hooks have **no dedicated folder** — they are configured entirely inside `settings.json` under the `hooks` key (see section 21). Commands are not a separate folder either; slash commands are served by `skills/`.
+
+### `/memory` — diagnosing instruction-loading inconsistencies
+
+`/memory` is a slash command that lists **exactly which files are loaded** in the current session: every CLAUDE.md, CLAUDE.local.md, and rules file currently in context.
+
+**Fastest way to debug inconsistent Claude behavior across developers:**
+
+1. Have each engineer run `/memory` in their session
+2. Compare the file lists side by side
+3. If a file is missing from one engineer's list → loading/scoping issue (wrong working directory, missing file, symlink dead, `claudeMdExcludes` filtering it out)
+4. If both lists are identical → the problem is in the rule text itself, not loading
+
+```
+/memory output (example):
+  Loaded context files:
+    CLAUDE.md (project root)
+    CLAUDE.local.md (project root) ← personal, gitignored
+    .claude/rules/linting.md
+    .claude/rules/security.md
+    ~/.claude/CLAUDE.md (user-level)
+```
+
+If engineer B's output is missing `.claude/rules/linting.md`, the root cause is a loading/scoping issue — not wording, not version mismatch, not git corruption.
 
 ---
 
@@ -325,3 +540,176 @@ Write(file_path="generated_output.py",             # step 3: single write
 - Use `type` to scope Grep to a language repo-wide; use `multiline: true` when patterns span line breaks
 - `output_mode` changes result format only — it does not affect which lines are matched
 - For whole-file reformats: `Read` → transform → `Write`; never `Edit` per line at scale
+
+---
+
+## 34. `claudeMdExcludes` — Filtering CLAUDE.md Loading in Monorepos
+
+### The problem
+
+In a monorepo, Claude Code loads CLAUDE.md files from multiple packages into context at startup. An engineer working exclusively in one package (`packages/web`) finds their context cluttered with instructions from sibling packages (`packages/admin-dashboard`, `packages/legacy-*`) they never touch. They want to exclude those files **without affecting teammates** who do work in those packages.
+
+### The solution — `claudeMdExcludes` in `settings.local.json`
+
+`claudeMdExcludes` accepts glob patterns and filters which CLAUDE.md files are loaded into context. Setting it in `.claude/settings.local.json` keeps the exclusion personal — the file is gitignored and never affects other developers.
+
+```json
+// .claude/settings.local.json  (gitignored — personal to this engineer)
+{
+  "claudeMdExcludes": [
+    "packages/admin-dashboard/**",
+    "packages/legacy-*/**"
+  ]
+}
+```
+
+### Settings scope for `claudeMdExcludes`
+
+`claudeMdExcludes` can be set at any settings scope:
+
+| File | Scope | Affects teammates? | Use when |
+|---|---|---|---|
+| `~/.claude/settings.json` | User-level (all projects) | ❌ No | Personal preference across all repos |
+| `.claude/settings.json` | Project-level (committed) | ✅ Yes | Team-wide exclusion everyone should have |
+| `.claude/settings.local.json` | Project-local (gitignored) | ❌ No | Personal preference for this project only |
+
+### Why other approaches fail
+
+| Approach | Why it fails |
+|---|---|
+| Move sibling CLAUDE.md files to `.claude/rules/` | Doesn't change loading scope — those files still load; just relocates them |
+| Add `claudeMdExcludes` to committed `.claude/settings.json` | Affects all teammates — engineers who need those files lose them |
+| Delete the CLAUDE.md files from other packages | Removes instructions other teammates depend on — destructive |
+
+### Key facts
+- `claudeMdExcludes` filters CLAUDE.md loading; it is not a security feature — it is a context-management convenience
+- `.claude/settings.local.json` is gitignored by design: personal settings that should never be committed (developer preferences, local path overrides, personal exclusions)
+- The committed `.claude/settings.json` is for team-wide defaults; `settings.local.json` overrides it locally for the individual developer
+
+---
+
+## 33. Piped Stdin Size Limit in Claude Code — 10 MB Cap
+
+### The behavior
+
+Claude Code enforces a hard **10 MB limit on piped stdin**. When the piped input exceeds this cap, the CLI:
+- Exits **immediately** with a non-zero status code
+- Emits a **clear error message** (does not silently discard or truncate)
+- Produces **no output** — the prompt is never processed
+
+```bash
+# Fails if build-error.txt > 10 MB
+cat build-error.txt | claude -p 'explain the root cause' > output.txt
+# → exits with error, output.txt is empty
+```
+
+### The workaround — reference the file path instead of piping
+
+Write the content to a file and let Claude read it via the Read tool:
+
+```bash
+# Works regardless of file size
+claude -p 'explain the root cause of errors in build-error.txt'
+```
+
+Claude will use the `Read` tool to access the file directly, bypassing the stdin size constraint entirely.
+
+### Why other explanations are wrong
+
+| Wrong claim | Reality |
+|---|---|
+| `>` redirect not supported with `-p` | The shell processes `>` before Claude sees anything — standard stdout redirect, works fine |
+| Plain text piping requires `--input-format stream-json` | Plain text is the **default** stdin format; `--input-format stream-json` is only needed for structured JSON input |
+| Non-UTF8 bytes cause immediate rejection | Encoding issues may cause content problems but are not the mechanism for an immediate exit on oversized logs; size is the documented trigger |
+
+### Key facts
+- Piped stdin cap: **10 MB** — exceeding it exits with error, never truncates silently
+- `--input-format stream-json` is for structured JSON piping, not a requirement for plain text
+- The `>` shell redirect is orthogonal to Claude's `-p` flag — both work together normally
+- For large inputs, always prefer file-path references over piped stdin
+
+---
+
+## 32. Blocking Bash in Non-Interactive / CI Pipelines — `--disallowedTools`
+
+### The problem
+
+A step like `git diff main | claude -p "you are a typo linter..."` pipes input to Claude and runs non-interactively. The maintainer wants Claude to have **zero ability to run arbitrary Bash commands** during that step, while keeping the invocation portable across Windows and Linux CI runners.
+
+### The solution — `--disallowedTools Bash`
+
+```bash
+git diff main | claude -p "you are a typo linter..." --disallowedTools Bash
+```
+
+`--disallowedTools` is a CLI flag that removes named tools from Claude's available tool set for that invocation. It works the same on every platform because it is a Claude CLI argument, not a shell feature.
+
+The complement flag `--allowedTools` restricts Claude to an explicit allowlist instead.
+
+### Why other approaches do NOT work
+
+| Approach | Why it fails |
+|---|---|
+| Run via `npm run lint` instead of a direct shell invocation | npm is a process runner — it has no effect on Claude's internal tool permissions; Bash still available |
+| Pipe input via stdin | Input delivery method is irrelevant to tool permissions; Claude still has Bash by default |
+| Write "do not use Bash" in the prompt string | Prompt text is probabilistic guidance, not a permission control; tools are configured by CLI flags or settings files, not conversation text |
+| No config (rely on default) | Default grants Bash access; nothing strips it |
+
+### Key mental model
+
+Tool permissions are a **configuration layer** that is entirely independent of:
+- How input is delivered (stdin pipe, file, interactive)
+- How Claude is invoked (npm, shell script, CI step)
+- What the prompt text says
+
+The only authoritative ways to restrict tools are:
+1. `--disallowedTools <Tool>` — remove specific tools for this invocation
+2. `--allowedTools <Tool>` — restrict to an explicit allowlist for this invocation
+3. `permissions.deny` in `.claude/settings.json` — project-level permanent restriction (see section 20)
+
+### When to use `--disallowedTools` vs `--allowedTools`
+
+| Goal | Use |
+|---|---|
+| Remove one or two dangerous tools, keep everything else | `--disallowedTools Bash` |
+| Restrict Claude to a minimal set (e.g. Read-only) | `--allowedTools Read,Glob,Grep` |
+| Fully locked CI with deterministic behaviour | `--permission-mode dontAsk` + `--allowedTools ...` (see section 20) |
+
+---
+
+## 35. CLAUDE.md `@path` Import Syntax — Triggering vs. Suppressing Imports
+
+### The behavior
+
+CLAUDE.md (and skill Markdown files) support an `@path` syntax that **imports another file's contents directly into context** at the point of reference:
+
+```markdown
+See @README for project overview and @package.json for available npm commands.
+```
+
+Both `@README` and `@package.json` are resolved and their file contents are loaded into context — not just mentioned as text.
+
+### Suppressing an import — wrap the path in backticks
+
+To reference a file path in prose **without** triggering an import (e.g., pointing a human reader to a file, not asking Claude to load it), wrap it in a Markdown code span:
+
+```markdown
+For legacy context, see `@docs/legacy-notes.md` (not auto-loaded).
+```
+
+**Why this works:** import parsing is Markdown-aware — it skips content inside inline code spans (`` `...` ``) and fenced code blocks (` ```...``` `). Text inside backticks is treated as literal, displayed text, never scanned for `@path` import triggers.
+
+### What does NOT suppress an import
+
+| Attempted escape | Why it fails |
+|---|---|
+| Double `@@` prefix (`@@docs/legacy-notes.md`) | Not a recognized escape sequence — no special "doubled @" parsing rule exists |
+| HTML comment (`<!-- @docs/legacy-notes.md -->`) | HTML comments are typically hidden from rendered output — fails the goal of being a *visible* pointer; also not a documented import-exclusion mechanism |
+| Space between `@` and path (`@ docs/legacy-notes.md`) | No documented rule ties import triggering to adjacency; inventing whitespace-sensitivity here is incorrect |
+
+### Key facts
+- `@path` in CLAUDE.md / skill Markdown = literal file import into context, resolved at load time
+- Backtick-wrapped paths (code spans or fenced blocks) are the documented way to mention a path as visible text without importing it
+- This import syntax is distinct from MCP `@server:resource` mention syntax (see section 26) — CLAUDE.md imports pull local file contents; MCP mentions reference server-hosted resources
+
+---

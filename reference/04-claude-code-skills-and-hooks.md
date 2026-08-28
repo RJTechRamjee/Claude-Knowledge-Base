@@ -146,6 +146,25 @@ This only works reliably if all repos are cloned under a common workspace folder
 
 Claude Code walks up the directory tree (same as CLAUDE.md), so a skill in a **parent directory's** `.claude/skills/` is available to all subdirectories on that machine.
 
+### Skills vs Commands — format comparison
+
+**Commands** (`.claude/commands/*.md` or `~/.claude/commands/*.md`) are the **legacy format**: a plain Markdown file whose content becomes the prompt for a slash command. No frontmatter, no configuration options.
+
+**Skills** (`.claude/skills/<name>/SKILL.md`) are the **current best-practice format**: YAML frontmatter + Markdown instructions. Skills unlock the full configuration layer.
+
+| Capability | Commands (legacy) | Skills (current) |
+|---|---|---|
+| Becomes a slash command | ✅ | ✅ (unified — same `/name` invocation) |
+| `allowed-tools` (auto-approve tools) | ❌ | ✅ |
+| `context: fork` (isolated subagent) | ❌ | ✅ |
+| `paths:` (auto-activate on file match) | ❌ | ✅ |
+| `user-invocable: false` (hide from `/` menu) | ❌ | ✅ |
+| Anthropic current recommendation | ❌ Legacy | ✅ Yes |
+
+**When to use which:** Use **skills** for all new work. Commands still function but offer none of the frontmatter configuration and are not the recommended approach.
+
+`~/.claude/commands/my-standup.md` is technically valid (user-level, never committed), but it is **not the best-practice answer** — Anthropic recommends `~/.claude/skills/my-standup/SKILL.md` with frontmatter for any reusable workflow.
+
 ### Personal skills — keeping a skill private to one developer
 
 To create a skill that is **never committed to the shared repo** and **invisible to teammates**:
@@ -161,17 +180,130 @@ To create a skill that is **never committed to the shared repo** and **invisible
 
 **Do NOT use** `.claude/commands/my-standup.md` (no `~`) — that path is inside the project folder, will appear in `git status`, and teammates will see `/my-standup` in their `/` menus.
 
-| Location | In git repo? | Visible to teammates? | Correct for personal use? |
+| Location | In git repo? | Visible to teammates? | Best practice? |
 |---|---|---|---|
-| `~/.claude/skills/my-standup/SKILL.md` | ❌ Never | ❌ No | ✅ Yes |
-| `.claude/skills/my-standup/SKILL.md` | ✅ Yes (committed) | ✅ Yes | ❌ No |
+| `~/.claude/skills/my-standup/SKILL.md` | ❌ Never | ❌ No | ✅ Yes — recommended |
+| `~/.claude/commands/my-standup.md` | ❌ Never | ❌ No | ⚠️ Valid but legacy format |
+| `.claude/skills/my-standup/SKILL.md` | ✅ Yes (committed) | ✅ Yes | ❌ Not for personal use |
 | `.claude/commands/my-standup.md` | ✅ Yes (committed) | ✅ Yes | ❌ No |
+
+### `context: fork` — isolated subagent execution
+
+`context: fork` in `SKILL.md` frontmatter causes the skill to run in an **isolated subagent context**. All intermediate steps (brainstorming, reasoning, tool calls) stay inside the forked context and never enter the main conversation history. Only the final result is returned to the user.
+
+```yaml
+---
+# .claude/skills/explore-alternatives/SKILL.md
+context: fork
+---
+Brainstorm several competing architecture approaches, evaluate each,
+and return only your final recommendation with rationale.
+```
+
+**What `context: fork` does:**
+- Spawns a subagent for the skill's execution
+- All intermediate back-and-forth stays inside the forked context
+- Only the subagent's final output surfaces back to the main conversation
+- Main conversation history is never polluted with exploratory reasoning
+
+**Without `context: fork`:** the skill runs inline — every intermediate step is visible in the main conversation, cluttering history.
+
+### `context: fork` + `agent: <type>` — the agent type controls starting context, not `fork` itself
+
+`context: fork` only establishes *isolation* (subagent runs, only final result returns to the main conversation). It does **not**, by itself, determine which files the forked subagent starts with — that is a property of the **agent type** named in `agent:`.
+
+```yaml
+---
+# .claude/skills/pr-summary/SKILL.md
+context: fork
+agent: Explore
+---
+Fetch PR data and summarize it.
+```
+
+`agent: Explore` runs the skill inside Claude Code's built-in **Explore** agent — a fast, read-only search agent deliberately designed for **lean context** (progressive disclosure: start minimal, load more only if needed). As part of that design, `Explore` does **not** load broad project-level files like `CLAUDE.md` at startup. A skill forked into `Explore` sees only the skill's own content plus `Explore`'s system prompt — project conventions defined in `CLAUDE.md` never enter that context, so a summary it produces cannot reflect those conventions.
+
+This is agent-type-specific, not a general `fork` behavior — forking into a different agent type (e.g. `general-purpose`) would load CLAUDE.md normally, since that agent isn't built around the same lean-context constraint.
+
+| Claim | Reality |
+|---|---|
+| `context: fork` always strips CLAUDE.md from every subagent | ❌ Fork only isolates; content available inside the fork depends on the agent type used |
+| `allowed-tools: Read` is required for CLAUDE.md to load into a forked agent | ❌ Not a real mechanism — CLAUDE.md loading isn't gated by tool permissions |
+| CLAUDE.md loads only when a skill is invoked without arguments | ❌ Invented — argument presence has no bearing on CLAUDE.md loading |
+
+**Rule:** when debugging "why doesn't my forked skill see project conventions," check which `agent:` type is forked into and whether that agent type is designed to skip broad context loading — not whether `context: fork` is present.
+
+### SKILL.md frontmatter field reference
+
+| Field | Purpose | What it does NOT do |
+|---|---|---|
+| `context: fork` | Run skill in isolated subagent; only final result returns | Does not restrict tools or hide the skill |
+| `allowed-tools: <list>` | Auto-approve listed tools (no prompt) | Does not restrict or sandbox tool access |
+| `paths: <glob>` | Auto-activate skill when matching files are touched | Does not affect execution context or tool access |
+| `user-invocable: false` | Hide skill from the `/` command menu | Does not isolate execution — skill still runs inline |
+
+### `allowed-tools` frontmatter — auto-approval, NOT restriction
+
+The `allowed-tools` field in `SKILL.md` frontmatter is a **permission-prompt bypass**, not a sandbox:
+
+```yaml
+---
+# .claude/skills/report-generator/SKILL.md
+allowed-tools: Write Edit
+---
+Generate a report and write it to a file.
+```
+
+**What it does:** Tools listed under `allowed-tools` are auto-approved for that skill invocation — the user is not prompted to click "Approve" when they fire.
+
+**What it does NOT do:** It does not restrict which tools the skill can access. Bash, Glob, and any other tool are still available to the skill; they will simply trigger a normal permission prompt when invoked.
+
+| Belief | Reality |
+|---|---|
+| `allowed-tools: Write Edit` restricts the skill to file operations only | ❌ Bash and all other tools remain accessible |
+| `allowed-tools` is the recommended least-privilege mechanism | ❌ It is a UX convenience (fewer prompts), not a security boundary |
+| `allowed-tools` sandboxes the skill and disables unlisted tools | ❌ No sandboxing occurs — unlisted tools still run (with prompt) |
+
+**To actually restrict tool access**, apply restrictions at the CLI or settings layer:
+- `--allowedTools Write,Edit` — restrict this invocation to listed tools
+- `--disallowedTools Bash` — remove a specific tool from this invocation
+- `permissions.deny` in `.claude/settings.json` — project-level permanent restriction
+
+### Workspace trust gates `allowed-tools` for project-level skills
+
+`allowed-tools` grants in project skills (`.claude/skills/`) are **inactive until the user accepts the workspace trust dialog**. This is a security measure: a cloned repo's skills cannot auto-approve dangerous commands until the developer explicitly signals they trust the workspace.
+
+```
+Flow for a newly cloned repo:
+  1. Developer clones repo containing .claude/skills/publish/SKILL.md
+     (frontmatter: allowed-tools: Bash(npm publish *))
+  2. Developer opens project in Claude Code
+  3. Workspace trust dialog NOT yet accepted
+  4. Developer invokes /publish skill
+  5. Claude Code prompts for approval — allowed-tools grant is inactive
+  6. Developer accepts workspace trust dialog
+  7. Next invocation of /publish: no prompt — grant is now active
+```
+
+| Skill location | Trust requirement for `allowed-tools` to activate |
+|---|---|
+| `~/.claude/skills/` (user-level) | None — user placed it there, implicitly trusted |
+| `.claude/skills/` (project-level) | Must accept workspace trust dialog for that project |
+
+**Common misconception:** `allowed-tools` only works for user-level skills (`~/.claude/skills/`). Reality: it works for both levels — project skills just require workspace trust acceptance first.
+
+**Syntax note:** Scoped bash commands use the pattern `Bash(command-prefix *)`:
+```yaml
+allowed-tools: Bash(npm publish *)   # pre-approves any npm publish invocation
+allowed-tools: Bash(git log *) Read  # pre-approves git log and Read tool
+```
 
 ### Key facts
 - Skills are **not** resolved through the Skills API — that path is for Claude API workspaces, not Claude Code
 - `~/.claude/skills/` does **not** sync across machines automatically; copy the file manually or use dotfiles management
 - Parent-directory `.claude/skills/` is inherited by all child project directories (directory tree walk-up)
 - `~/.claude/` (home directory) is **never inside any git repo** — files there are always private to that developer
+- `allowed-tools` in `SKILL.md` = auto-approve listed tools (no prompt); it does NOT sandbox or restrict the skill's tool access
 
 ---
 
