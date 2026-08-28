@@ -119,6 +119,11 @@ MCP server authentication
 │                       (also called apiKeyHelper)
 ├── oauth block         → only when a real OAuth authorization server exists
 └── transport (http/sse/stdio) → orthogonal to auth, never carries auth logic itself
+
+MCP server scope precedence (duplicate server name across scopes)
+├── local  > project  > user  > plugin-provided  > claude.ai connectors
+├── winner takes the ENTIRE entry — no field-level merging
+└── version control status (checked-in vs not) has NO effect on precedence
 ```
 
 *Kept in a separate file so the main reference sections can grow without renumbering.*
