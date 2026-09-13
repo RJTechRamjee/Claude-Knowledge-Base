@@ -8,31 +8,50 @@ This is a **documentation-only knowledge base** — there is nothing to build, t
 
 ## Key Files
 
-**[anthropic_api_reference.md](anthropic_api_reference.md)** is now a slim **index** into the reference content — it lists every numbered section with a link into the file under `reference/` that actually holds it. The reference itself is split by topic across six files so no single file grows unbounded:
+**[anthropic_api_reference.md](anthropic_api_reference.md)** is a slim **index** into the reference content — it lists every numbered section with a link into the file under `reference/` that actually holds it, plus the exam blueprint weights, the 6 exam scenarios, and a "focus areas" table pointing at the weakest-scoring task statements from the last practice attempt. The reference is organized to **mirror the exam's own 5-domain blueprint** (Claude Certified Architect – Foundations, CCAR-F), so studying by domain and studying by file are the same thing:
 
-- `reference/01-messages-api-core.md` — Messages API core (tool choice, content blocks, stop reasons, built-in/local tools, models & pricing, message roles, request params, response fields)
-- `reference/02-tool-use-and-sessions.md` — Session resumption, multi-turn tool loop, maxTurns, structured output edge cases, Message Batches API
-- `reference/03-claude-code-config.md` — CLI session management, path-scoped rules/symlinks, permission modes, `.claude/rules/`, tool selection (Bash vs. Read/Glob/Grep)
-- `reference/04-claude-code-skills-and-hooks.md` — Skills scope/resolution, hooks (types, blocking vs. observational)
-- `reference/05-multi-agent-and-context.md` — Multi-instance review, context window management, XML tag prompt structuring, hub-and-spoke multi-agent architecture, agent escalation design, prompt specificity tradeoffs
-- `reference/06-mcp.md` — MCP resources/@ mentions, `.mcp.json` env var expansion, server authentication, scope precedence
+- `reference/00-foundations-messages-api.md` — prerequisite Messages API mechanics every domain assumes: tool choice, content blocks, stop reasons, built-in/local tools, models & pricing, request/response shape, the tool loop, `maxTurns`, API statelessness
+- `reference/01-agentic-architecture-and-orchestration.md` — **Domain 1 (27%)**: agentic loop anti-patterns, hub-and-spoke, the `Task` tool & `AgentDefinition`, workflow enforcement/handoff, Agent SDK hooks, task decomposition, session management, `fork_session`
+- `reference/02-tool-design-and-mcp-integration.md` — **Domain 2 (18%)**: tool description quality, structured MCP error responses, tool distribution across agents, MCP server scope/config/resources, built-in tool selection
+- `reference/03-claude-code-configuration-and-workflows.md` — **Domain 3 (20%)**: choosing the right config mechanism (CLAUDE.md vs. rules vs. skills vs. hooks vs. permissions), slash commands/skills, path-scoped rules, permission modes, plan mode, iterative refinement, CI/CD integration
+- `reference/04-prompt-engineering-and-structured-output.md` — **Domain 4 (20%)**: explicit criteria/false-positive reduction, XML tag structuring, few-shot prompting, `tool_use` + JSON schema enforcement, validation/retry/feedback loops, Message Batches API, multi-instance/multi-pass review
+- `reference/05-context-management-and-reliability.md` — **Domain 5 (15%)**: long-session context preservation, escalation/ambiguity resolution, error propagation across multi-agent systems, human review/confidence calibration, information provenance
+- `reference/06-out-of-scope.md` — topics the exam guide explicitly excludes (fine-tuning, billing/auth protocol details, cloud-provider specifics, computer use, vision, streaming, rate limits, benchmarking, prompt-caching/tokenization internals). Keep genuinely out-of-scope material here, not mixed into a domain file.
 
-Section numbering is global and never renumbers — each section keeps its original number regardless of which file it lives in. The index in `anthropic_api_reference.md` tracks the next available number.
+Section numbering is global and never renumbers — each section keeps its original number regardless of which file it lives in, even when a section is relocated to a different domain file during a restructure. The index in `anthropic_api_reference.md` tracks the next available number.
 
 **[claude_commands.md](claude_commands.md)** is the slash commands reference — when/why/how for all built-in commands and skills, most important ones first.
 
-**[mental_map.md](mental_map.md)** is the structural overview (ASCII tree of the full API + patterns). Kept separate so adding sections to the reference never forces a renumber. **Update this file whenever a new concept is added to the reference.** It covers:
+**[mental_map.md](mental_map.md)** is the structural overview. It has two parts: an **Exam Domain Map** (condensed ASCII summary of all 5 domains, cross-referenced to `anthropic_api_reference.md` section numbers) and a **General API / Claude Code Structural Map** (the full API surface, including things outside exam scope). **Update the Exam Domain Map whenever a new exam-relevant concept is added to the reference**; only touch the general map for non-exam API/CLI facts.
 
-- Tool choice modes (`auto`, `any`, `tool`, `none`) and local tool definition schema
-- Content block types (`text`, `tool_use`, `tool_result`, `image`, `document`) and stop reasons
-- Built-in tools (`web_search`, `bash`, `str_replace_editor`, `computer`) vs. local tools
-- Full `client.messages.create()` parameter reference and response object fields
-- Multi-turn tool loop pattern (complete Python example)
-- Claude Code CLI session management (`--name`, `--resume`, `/rename`)
-- `maxTurns` behavior and configuration (CLI and API)
-- Quick mental map (ASCII tree of the full API structure)
+Target model documented: `claude-sonnet-4-6`. Target SDKs: `anthropic` (Python) and `claude-agent-sdk` (Python). Reference marked current as of August 2026.
 
-Target model documented: `claude-sonnet-4-6`. Target SDK: `anthropic` (Python). Reference marked current as of August 2026.
+### Exam-Blueprint Alignment Rules
+
+These layer on top of the Q&A workflow below — apply them whenever the conversation touches certification-exam content specifically (as opposed to general Claude/API questions unrelated to the exam):
+
+1. **Tag new content with its Task Statement.** When adding a section that maps to a specific exam Task Statement (e.g. "Task Statement 2.2"), name it explicitly in the section's opening line, the way existing sections do. This is what makes the domain files double as a blueprint checklist.
+2. **Scenario-fit code examples.** Code samples illustrating exam concepts should use one of the 6 established running scenarios (Customer Support Resolution Agent, Code Generation with Claude Code, Multi-Agent Research System, Developer Productivity, Claude Code for CI, Structured Data Extraction) and their established fixtures (tool names, subagent names, schemas — see each domain file's "Running example" line) rather than inventing new one-off scenarios, unless the question is about a 7th scenario not on this list.
+3. **Out-of-scope routing.** If a question is about a real, current Claude/Anthropic feature that the exam guide's Appendix explicitly excludes (fine-tuning, billing, computer use, vision, streaming, prompt-caching internals, etc.), still answer it — accurately, using `claude-api`-skill-grade knowledge if useful — but file any reference-worthy notes in `reference/06-out-of-scope.md`, not into a domain file. Note the scope difference in the answer to the user.
+4. **Verify before writing.** For Claude Agent SDK / Claude Code CLI specifics in particular (subagent config field names, hook signatures, CLI flags), don't write down a recalled pattern without checking it against current `code.claude.com/docs` — these surfaces have drifted before (e.g. the Agent SDK's `AgentDefinition`/`Task`/`fork_session` mechanics look similar to, but are distinct from, the CLI's filesystem-based `.claude/agents/*.md` subagent convention).
+
+## Offline / Print Copy
+
+**[EXAM_PREP_FULL.md](EXAM_PREP_FULL.md)** is a generated, consolidated single-file concatenation of `anthropic_api_reference.md` + every `reference/*.md` file (in domain order) + `mental_map.md` + `claude_commands.md` — for offline reading or printing (e.g. via VS Code's "Markdown PDF" export, or `pandoc EXAM_PREP_FULL.md -o EXAM_PREP_FULL.pdf`). It is a **build artifact, not a source file** — never hand-edit it directly; regenerate it after any change to the source files with:
+
+```bash
+{
+  cat anthropic_api_reference.md
+  for f in reference/00-foundations-messages-api.md reference/01-agentic-architecture-and-orchestration.md \
+           reference/02-tool-design-and-mcp-integration.md reference/03-claude-code-configuration-and-workflows.md \
+           reference/04-prompt-engineering-and-structured-output.md reference/05-context-management-and-reliability.md \
+           reference/06-out-of-scope.md; do cat "$f"; done
+  cat mental_map.md
+  cat claude_commands.md
+} > EXAM_PREP_FULL.md
+```
+
+Regenerate it as one of the last steps of any session that touches the reference — don't leave it stale.
 
 ## Certification Study Workflow
 
