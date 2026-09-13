@@ -75,92 +75,92 @@ These task statements scored 0%–50% and got extra depth/worked examples in thi
 ### Foundations — Messages API Core Mechanics — [reference/00-foundations-messages-api.md](reference/00-foundations-messages-api.md)
 Prerequisite building blocks assumed by every domain: tool choice, content blocks, stop reasons, built-in/local tools, models & pricing, message roles, request/response shape, the multi-turn tool loop, `maxTurns`, and API statelessness.
 
-- 1. Tool Choice
-- 2. Content Block Types
-- 3. Stop Reasons
-- 4. Built-in (Standard) Tools
-- 5. Local Tool Definition
-- 6. Current Models and Pricing
-- 7. Session Resumption — The API Is Stateless
-- 8. Message Roles
-- 9. Top-level Request Parameters
-- 10. Response Object Fields
-- 11. Multi-turn Tool Loop Pattern
-- 13. `maxTurns`
+- §1 — Tool Choice
+- §2 — Content Block Types
+- §3 — Stop Reasons
+- §4 — Built-in (Standard) Tools
+- §5 — Local Tool Definition
+- §6 — Current Models and Pricing
+- §7 — Session Resumption — The API Is Stateless
+- §8 — Message Roles
+- §9 — Top-level Request Parameters
+- §10 — Response Object Fields
+- §11 — Multi-turn Tool Loop Pattern
+- §13 — `maxTurns`
 
 ### Domain 1: Agentic Architecture & Orchestration (27%) — [reference/01-agentic-architecture-and-orchestration.md](reference/01-agentic-architecture-and-orchestration.md)
 Agentic loop anti-patterns, hub-and-spoke orchestration, the `Task`/`Agent` tool & `AgentDefinition`, multi-step workflow enforcement/handoff, Agent SDK hooks, task decomposition strategy, session management, and `fork_session`.
 
-- 12. Session Management (Claude Code CLI and Agent SDK)
-- 21. Agent SDK / Claude Code Hooks — Tool Call Interception and Data Normalization
-- 24. Multi-Agent Architecture — Hub-and-Spoke Pattern
-- 36. Subagent Spawning — the `Task`/`Agent` Tool and `AgentDefinition`
-- 37. `fork_session` — Branching a Session (Agent SDK)
-- 38. Task Decomposition Strategies for Complex Workflows
-- 39. Multi-Step Workflows — Enforcement and Handoff Patterns
-- 40. Agentic Loop Anti-Patterns — What NOT to Check for Termination
+- §12 — Session Management (Claude Code CLI and Agent SDK)
+- §21 — Agent SDK / Claude Code Hooks — Tool Call Interception and Data Normalization
+- §24 — Multi-Agent Architecture — Hub-and-Spoke Pattern
+- §36 — Subagent Spawning — the `Task`/`Agent` Tool and `AgentDefinition`
+- §37 — `fork_session` — Branching a Session (Agent SDK)
+- §38 — Task Decomposition Strategies for Complex Workflows
+- §39 — Multi-Step Workflows — Enforcement and Handoff Patterns
+- §40 — Agentic Loop Anti-Patterns — What NOT to Check for Termination
 
 ### Domain 2: Tool Design & MCP Integration (18%) — [reference/02-tool-design-and-mcp-integration.md](reference/02-tool-design-and-mcp-integration.md)
 Tool description quality & disambiguation, structured MCP error responses, distributing tools across agents, MCP server scope/config/resources, and systematic use of built-in tools.
 
-- 23. Built-in Tool Selection — Bash vs. Read/Glob/Grep, and Edit vs. Write
-- 26. MCP Server Resources: @ Mention Reference Syntax *(covered within §44)*
-- 27. MCP Config: Environment Variable Expansion in `.mcp.json` *(covered within §44)*
-- 28. MCP Server Authentication *(covered within §44)*
-- 29. MCP Server Config: Scope Precedence for Duplicate Server Names *(covered within §44)*
-- 41. Tool Description Quality and Disambiguation
-- 42. Structured Error Responses for MCP Tools
-- 43. Distributing Tools Appropriately Across Agents
-- 44. Configuring MCP Servers at the Correct Scope
-- 45. Systematic Codebase Exploration — Grep, Glob, Read Together
+- §23 — Built-in Tool Selection — Bash vs. Read/Glob/Grep, and Edit vs. Write
+- §26 — MCP Server Resources: @ Mention Reference Syntax *(covered within §44)*
+- §27 — MCP Config: Environment Variable Expansion in `.mcp.json` *(covered within §44)*
+- §28 — MCP Server Authentication *(covered within §44)*
+- §29 — MCP Server Config: Scope Precedence for Duplicate Server Names *(covered within §44)*
+- §41 — Tool Description Quality and Disambiguation
+- §42 — Structured Error Responses for MCP Tools
+- §43 — Distributing Tools Appropriately Across Agents
+- §44 — Configuring MCP Servers at the Correct Scope
+- §45 — Systematic Codebase Exploration — Grep, Glob, Read Together
 
 ### Domain 3: Claude Code Configuration & Workflows (20%) — [reference/03-claude-code-configuration-and-workflows.md](reference/03-claude-code-configuration-and-workflows.md)
 Choosing the right configuration mechanism, enforcement vs. guidance, `PostToolUse` quality gates, slash commands & skills, path-scoped rules, permission modes, CLI supporting mechanics, plan mode, iterative refinement, and CI/CD integration.
 
-- 16. Custom Slash Commands and Skills — Scope and Configuration
-- 18. Path-Scoped Rules and Symlinks in Claude Code
-- 20. Claude Code Permission Modes
-- 22. `.claude/rules/` and Path-Scoped Loading (incl. `/memory`)
-- 32. Blocking Bash in CI — `--disallowedTools`
-- 33. Piped Stdin Size Limit in Claude Code — 10 MB Cap
-- 34. `claudeMdExcludes` — Personal Monorepo Filtering
-- 35. CLAUDE.md `@path` Import Syntax
-- 46. Choosing the Right Claude Code Configuration Mechanism
-- 47. Enforcement Layer vs. Guidance Layer — the Deterministic/Probabilistic Split
-- 48. `PostToolUse` Hooks for Automatic Code-Quality Enforcement
-- 49. Plan Mode vs. Direct Execution
-- 50. Iterative Refinement Techniques
-- 51. Integrating Claude Code into CI/CD Pipelines
+- §16 — Custom Slash Commands and Skills — Scope and Configuration
+- §18 — Path-Scoped Rules and Symlinks in Claude Code
+- §20 — Claude Code Permission Modes
+- §22 — `.claude/rules/` and Path-Scoped Loading (incl. `/memory`)
+- §32 — Blocking Bash in CI — `--disallowedTools`
+- §33 — Piped Stdin Size Limit in Claude Code — 10 MB Cap
+- §34 — `claudeMdExcludes` — Personal Monorepo Filtering
+- §35 — CLAUDE.md `@path` Import Syntax
+- §46 — Choosing the Right Claude Code Configuration Mechanism
+- §47 — Enforcement Layer vs. Guidance Layer — the Deterministic/Probabilistic Split
+- §48 — `PostToolUse` Hooks for Automatic Code-Quality Enforcement
+- §49 — Plan Mode vs. Direct Execution
+- §50 — Iterative Refinement Techniques
+- §51 — Integrating Claude Code into CI/CD Pipelines
 
 *(§52 is unused — reserved slot from an earlier draft, never assigned.)*
 
 ### Domain 4: Prompt Engineering & Structured Output (20%) — [reference/04-prompt-engineering-and-structured-output.md](reference/04-prompt-engineering-and-structured-output.md)
 Explicit criteria & false-positive reduction, XML tag structuring, few-shot prompting, `tool_use` + JSON schema enforcement, validation/retry/feedback loops, the Message Batches API, and multi-instance/multi-pass review.
 
-- 14. Multi-Instance and Multi-Pass Review Architectures *(includes the former "multi-pass" content once drafted separately as §57 — folded in; §57 is retired)*
-- 15. Structured Output — Handling Missing Data in Tool Schemas *(covered within §55)*
-- 19. Prompt Structuring — XML Tags for Category Isolation
-- 30. Message Batches API and Batch Processing Strategy
-- 31. Explicit Criteria to Improve Precision and Reduce False Positives *(§53 folded in — retired, same task statement)*
-- 54. Few-Shot Prompting for Output Consistency
-- 55. Enforcing Structured Output with `tool_use` and JSON Schemas
-- 56. Validation, Retry, and Feedback Loops for Extraction Quality
+- §14 — Multi-Instance and Multi-Pass Review Architectures *(includes the former "multi-pass" content once drafted separately as §57 — folded in; §57 is retired)*
+- §15 — Structured Output — Handling Missing Data in Tool Schemas *(covered within §55)*
+- §19 — Prompt Structuring — XML Tags for Category Isolation
+- §30 — Message Batches API and Batch Processing Strategy
+- §31 — Explicit Criteria to Improve Precision and Reduce False Positives *(§53 folded in — retired, same task statement)*
+- §54 — Few-Shot Prompting for Output Consistency
+- §55 — Enforcing Structured Output with `tool_use` and JSON Schemas
+- §56 — Validation, Retry, and Feedback Loops for Extraction Quality
 
 ### Domain 5: Context Management & Reliability (15%) — [reference/05-context-management-and-reliability.md](reference/05-context-management-and-reliability.md)
 Long-session context preservation, large-codebase exploration, escalation/ambiguity resolution, error propagation across multi-agent systems, human review/confidence calibration, and information provenance in multi-source synthesis.
 
-- 17. Managing Conversation Context to Preserve Critical Information
-- 25. Agent Escalation Design — Self-Reported Confidence, in Detail
-- 58. Escalation Triggers and Ambiguity Resolution
-- 59. Error Propagation Strategies Across Multi-Agent Systems
-- 60. Context Management in Large Codebase Exploration
-- 61. Human Review Workflows and Confidence Calibration
-- 62. Information Provenance and Uncertainty in Multi-Source Synthesis
+- §17 — Managing Conversation Context to Preserve Critical Information
+- §25 — Agent Escalation Design — Self-Reported Confidence, in Detail
+- §58 — Escalation Triggers and Ambiguity Resolution
+- §59 — Error Propagation Strategies Across Multi-Agent Systems
+- §60 — Context Management in Large Codebase Exploration
+- §61 — Human Review Workflows and Confidence Calibration
+- §62 — Information Provenance and Uncertainty in Multi-Source Synthesis
 
 ### Out-of-Scope Exam Topics — [reference/06-out-of-scope.md](reference/06-out-of-scope.md)
 Fine-tuning, billing/auth protocol details, cloud-provider specifics, computer use, vision, streaming, rate limits, benchmarking, prompt-caching/tokenization internals, and other topics the exam guide explicitly excludes.
 
-- 63. Out-of-Scope Topics Quick Reference
+- §63 — Out-of-Scope Topics Quick Reference
 
 
 <!-- ============================================================ -->
